@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "notion": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["tool", "run", "mcp-notion"],
+      "env": {
+        "NOTION_API_KEY": "${NOTION_API_KEY}"
+      }
+    },
+    "trello": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["tool", "run", "mcp-trello"],
+      "env": {
+        "TRELLO_API_KEY": "${TRELLO_API_KEY}",
+        "TRELLO_TOKEN": "${TRELLO_TOKEN}"
+      }
+    },
+    "drawio": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["tool", "run", "drawio-mcp"],
+      "env": {}
+    },
+    "excalidraw": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["tool", "run", "excalidraw-mcp"],
+      "env": {}
+    }
+  }
+}
