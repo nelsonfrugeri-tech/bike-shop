@@ -16,6 +16,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 
+from bike_shop.agents import PROJECT_LEAD
 from bike_shop.config import AgentConfig, resolve_team_mentions
 
 logger = logging.getLogger(__name__)
@@ -392,12 +393,12 @@ def _process_and_reply(config: AgentConfig, say, client: WebClient,
                        context: str, question: str, thread_ts: str) -> None:
     """Process Claude call in background thread and reply when done."""
     try:
-        # Check if Nelson manually triggered deep thinking
+        # Check if project lead manually triggered deep thinking
         force_opus = _check_deep_think_trigger(question)
         model_override = config.opus_model_id if force_opus else None
 
         if force_opus:
-            logger.info("[%s] Nelson triggered deep thinking — using Opus", config.name)
+            logger.info("[%s] Project lead triggered deep thinking — using Opus", config.name)
 
         reply = _call_claude(config, context, question, thread_ts, model_override=model_override)
 
@@ -409,7 +410,7 @@ def _process_and_reply(config: AgentConfig, say, client: WebClient,
                 logger.warning("[%s] Max Opus escalations reached (%d) for thread %s",
                                config.name, MAX_OPUS_ESCALATIONS, thread_ts)
                 reply = reply.replace(DEEP_THINK_MARKER, "").strip()
-                reply += "\n\n⚠️ _Atingi o limite de escalações — preciso da sua decisão, Nelson._"
+                reply += f"\n\n⚠️ _Atingi o limite de escalações — preciso da sua decisão, {PROJECT_LEAD}._"
             else:
                 _opus_escalations[thread_ts] = escalation_count + 1
                 logger.info("[%s] Self-escalating to Opus (escalation %d/%d) for thread %s",
