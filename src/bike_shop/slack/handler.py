@@ -20,6 +20,7 @@ from bike_shop.session import SessionStore
 from bike_shop.slack.context import (
     build_mention_instruction,
     get_channel_context,
+    get_team_mentions,
     get_thread_context,
     is_mentioned,
     resolve_user,
@@ -27,6 +28,24 @@ from bike_shop.slack.context import (
 )
 
 logger = logging.getLogger(__name__)
+
+MAX_AGENT_INTERACTIONS = 5
+
+# Track agent-to-agent messages per thread: thread_ts -> count
+_agent_interactions: dict[str, int] = {}
+
+# Bot user IDs of all agents — resolved lazily
+_bot_user_ids: set[str] | None = None
+
+
+def _get_bot_user_ids() -> set[str]:
+    global _bot_user_ids
+    if _bot_user_ids is None:
+        mentions = get_team_mentions()
+        _bot_user_ids = set(mentions.values())
+        logger.info("Bot user IDs resolved: %s", _bot_user_ids)
+    return _bot_user_ids
+
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _BASE_MCP_CONFIG = os.path.join(_PROJECT_ROOT, "mcp.json")
@@ -88,6 +107,11 @@ def _build_prompt(config: AgentConfig, context: str, question: str,
             "Example: gh api repos/OWNER/REPO/issues -f title='...' -f body='...'"
         )
 
+    # Inject memory context (recent messages, decisions, summaries)
+    memory_context = memory.get_recent_context()
+    if memory_context:
+        parts.append(memory_context)
+
     parts.append(memory.build_instruction())
     parts.append(build_mention_instruction(config.name))
     parts.append(f"\n\n--- CONVERSATION CONTEXT ---\n{context}")
@@ -111,7 +135,6 @@ class SlackAgentHandler:
                   model_override: str | None = None) -> str:
         """Call the LLM provider and handle session tracking."""
         config = self._config
-        mem_file = self._memory.ensure()
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
@@ -123,7 +146,7 @@ class SlackAgentHandler:
             prompt,
             model_override=model_override,
             session_id=session_id,
-            memory_file=mem_file if self._memory.exists() else None,
+            memory_file=None,
             mcp_config=mcp_config,
             github_token=github_token,
         )
@@ -133,11 +156,44 @@ class SlackAgentHandler:
 
         return response
 
+    def _auto_summarize(self) -> None:
+        """Use a lightweight LLM call (haiku) to summarize recent messages."""
+        messages = self._memory._load_json(self._memory._messages_path)
+        if not messages:
+            return
+        recent = messages[-10:]
+        lines = [f"{m['user']}: {m['text']}" for m in recent]
+        conversation = "\n".join(lines)
+
+        summary_prompt = (
+            "Summarize this conversation in 3-5 bullet points. "
+            "Focus on: decisions made, tasks assigned, open questions. "
+            "Be concise. Output only the bullet points.\n\n"
+            f"{conversation}"
+        )
+
+        try:
+            from bike_shop.config import MODEL_MAP
+            summary, _ = self._provider.call(
+                self._config,
+                summary_prompt,
+                model_override=MODEL_MAP["haiku"],
+            )
+            self._memory.record_summary(summary)
+            logger.info("[%s] Auto-summary saved via haiku", self._config.name)
+        except Exception as e:
+            # Fallback: save raw messages as summary
+            self._memory.record_summary(f"Last 10 messages (raw):\n{conversation}")
+            logger.warning("[%s] Summary fallback (haiku failed): %s", self._config.name, e)
+
     def _process_and_reply(self, say, client: WebClient,
                            context: str, question: str, thread_ts: str) -> None:
         """Process LLM call in background thread and reply when done."""
         config = self._config
         try:
+            # Record incoming message
+            self._memory.record_message(question.split(": ", 1)[0], question)
+
             force_opus = self._switcher.is_manual_trigger(question)
             model_override = config.opus_model_id if force_opus else None
 
@@ -159,7 +215,18 @@ class SlackAgentHandler:
                     reply = self._switcher.strip_marker(reply)
 
             logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
-            say(reply, thread_ts=thread_ts)
+
+            # Suppress empty/no-action responses — don't waste Slack messages
+            skip_phrases = {"no response requested", "no action needed", "nothing to do", "..."}
+            if reply.strip().lower().rstrip(".!") in skip_phrases or len(reply.strip()) < 5:
+                logger.info("[%s] Suppressed non-substantive response", config.name)
+            else:
+                say(reply, thread_ts=thread_ts)
+
+            # Record outgoing response and auto-summarize if needed
+            self._memory.record_message(config.name, reply)
+            if self._memory.needs_summary():
+                self._auto_summarize()
         except Exception as e:
             logger.error("[%s] Background processing error: %s", config.name, e)
             say("(error processing — I saved my progress and will pick up next time)", thread_ts=thread_ts)
@@ -180,9 +247,27 @@ class SlackAgentHandler:
         if not clean_text:
             return
 
+        thread_ts = event.get("thread_ts") or event.get("ts")
+
+        # Track agent-to-agent interactions and enforce limit
+        is_from_agent = user_id in _get_bot_user_ids()
+        if is_from_agent:
+            count = _agent_interactions.get(thread_ts, 0)
+            if count >= MAX_AGENT_INTERACTIONS:
+                logger.warning(
+                    "[%s] Ignoring agent message — limit of %d agent interactions "
+                    "reached in thread %s",
+                    self._config.name, MAX_AGENT_INTERACTIONS, thread_ts,
+                )
+                return
+            _agent_interactions[thread_ts] = count + 1
+            logger.info(
+                "[%s] Agent-to-agent interaction %d/%d in thread %s",
+                self._config.name, count + 1, MAX_AGENT_INTERACTIONS, thread_ts,
+            )
+
         user_name = resolve_user(client, user_id) if user_id else "someone"
         channel = event["channel"]
-        thread_ts = event.get("thread_ts") or event.get("ts")
 
         context = get_thread_context(client, channel, thread_ts)
         if not context:
