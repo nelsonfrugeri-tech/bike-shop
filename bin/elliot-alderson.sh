@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /Users/nelson.frugeri
+cd "${HOME}"
 
 MODEL="${1:-sonnet}"
 AGENT_FILE="elliot-alderson-${MODEL}.md"

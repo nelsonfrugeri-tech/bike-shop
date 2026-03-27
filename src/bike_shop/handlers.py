@@ -344,7 +344,7 @@ def _call_claude(config: AgentConfig, context: str, question: str,
             capture_output=True,
             text=True,
             timeout=None,
-            cwd="/Users/nelson.frugeri",
+            cwd=os.path.expanduser("~"),
             env=env,
         )
         if result.returncode != 0:
