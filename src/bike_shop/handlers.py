@@ -56,8 +56,16 @@ def _mention_instruction(agent_name: str) -> str:
 MEMORY_BASE = os.path.expanduser("~/.claude/workspace/bike-shop/memory")
 SESSION_TTL = 86400  # 24h
 
+DEEP_THINK_MARKER = "[DEEP_THINK]"
+DEEP_THINK_TRIGGERS = {"pensem profundamente", "pensem com calma", "analisem com calma",
+                        "analisem profundamente", "think deeply", "analyze carefully"}
+MAX_OPUS_ESCALATIONS = 2
+
 # Cache: agent_name -> (token, expires_at, mcp_config_path)
 _github_token_cache: dict[str, tuple[str, float, str]] = {}
+
+# Track opus escalations per thread: thread_ts -> count
+_opus_escalations: dict[str, int] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -282,13 +290,15 @@ def _is_mentioned(text: str, bot_user_id: str) -> bool:
 # Claude CLI call — no timeout, with session tracking + memory
 # ---------------------------------------------------------------------------
 
-def _call_claude(config: AgentConfig, context: str, question: str, thread_ts: str | None = None) -> str:
+def _call_claude(config: AgentConfig, context: str, question: str,
+                  thread_ts: str | None = None, model_override: str | None = None) -> str:
     """Call claude CLI with session tracking and persistent memory. No timeout."""
     agent_key = config.agent_key
     mem_file = _ensure_memory_file(agent_key)
 
     mcp_config = _build_mcp_config(config)
     github_token = _get_github_token(config)
+    model_id = model_override or config.model_id
 
     tool_instructions = ""
     if github_token:
@@ -311,6 +321,7 @@ def _call_claude(config: AgentConfig, context: str, question: str, thread_ts: st
         "--dangerously-skip-permissions",
         "--output-format", "stream-json",
         "--verbose",
+        "--model", model_id,
         "--mcp-config", mcp_config,
     ]
 
@@ -371,11 +382,45 @@ def _call_claude(config: AgentConfig, context: str, question: str, thread_ts: st
 # Async processing — run Claude in background thread, reply when done
 # ---------------------------------------------------------------------------
 
+def _check_deep_think_trigger(question: str) -> bool:
+    """Check if the user message contains a manual trigger for Opus."""
+    q_lower = question.lower()
+    return any(trigger in q_lower for trigger in DEEP_THINK_TRIGGERS)
+
+
 def _process_and_reply(config: AgentConfig, say, client: WebClient,
                        context: str, question: str, thread_ts: str) -> None:
     """Process Claude call in background thread and reply when done."""
     try:
-        reply = _call_claude(config, context, question, thread_ts)
+        # Check if Nelson manually triggered deep thinking
+        force_opus = _check_deep_think_trigger(question)
+        model_override = config.opus_model_id if force_opus else None
+
+        if force_opus:
+            logger.info("[%s] Nelson triggered deep thinking — using Opus", config.name)
+
+        reply = _call_claude(config, context, question, thread_ts, model_override=model_override)
+
+        # Check if agent self-escalated via [DEEP_THINK]
+        if DEEP_THINK_MARKER in reply:
+            escalation_count = _opus_escalations.get(thread_ts, 0)
+
+            if escalation_count >= MAX_OPUS_ESCALATIONS:
+                logger.warning("[%s] Max Opus escalations reached (%d) for thread %s",
+                               config.name, MAX_OPUS_ESCALATIONS, thread_ts)
+                reply = reply.replace(DEEP_THINK_MARKER, "").strip()
+                reply += "\n\n⚠️ _Atingi o limite de escalações — preciso da sua decisão, Nelson._"
+            else:
+                _opus_escalations[thread_ts] = escalation_count + 1
+                logger.info("[%s] Self-escalating to Opus (escalation %d/%d) for thread %s",
+                            config.name, escalation_count + 1, MAX_OPUS_ESCALATIONS, thread_ts)
+                say("_(pensando mais profundamente...)_", thread_ts=thread_ts)
+
+                # Re-run with Opus
+                reply = _call_claude(config, context, question, thread_ts,
+                                     model_override=config.opus_model_id)
+                reply = reply.replace(DEEP_THINK_MARKER, "").strip()
+
         logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
         say(reply, thread_ts=thread_ts)
     except Exception as e:

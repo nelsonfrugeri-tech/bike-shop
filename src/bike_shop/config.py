@@ -13,6 +13,13 @@ AGENT_REGISTRY: dict[str, tuple[str, str]] = {
 }
 
 
+MODEL_MAP: dict[str, str] = {
+    "opus": "claude-opus-4-20250514",
+    "sonnet": "claude-sonnet-4-20250514",
+    "haiku": "claude-haiku-4-5-20251001",
+}
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     name: str
@@ -22,9 +29,18 @@ class AgentConfig:
     system_prompt: str
     agent_key: str = ""
     bot_user_id: str = ""
+    default_model: str = "sonnet"
     github_app_id: str = ""
     github_pem_path: str = ""
     github_installation_id: str = ""
+
+    @property
+    def model_id(self) -> str:
+        return MODEL_MAP.get(self.default_model, MODEL_MAP["sonnet"])
+
+    @property
+    def opus_model_id(self) -> str:
+        return MODEL_MAP["opus"]
 
 
 def load_config(agent_name: str) -> AgentConfig:
@@ -56,6 +72,7 @@ def load_config(agent_name: str) -> AgentConfig:
         raise SystemExit(f"Failed to authenticate {agent_name}: {e}")
 
     persona = PERSONAS[persona_key]
+    default_model = persona.get("default_model", "sonnet")
 
     github_app_id = os.environ.get(f"{env_prefix}_GITHUB_APP_ID", "")
     github_pem_path = os.path.expanduser(os.environ.get(f"{env_prefix}_GITHUB_PEM_PATH", ""))
@@ -69,6 +86,7 @@ def load_config(agent_name: str) -> AgentConfig:
         system_prompt=persona["system_prompt"],
         agent_key=agent_name,
         bot_user_id=bot_user_id,
+        default_model=default_model,
         github_app_id=github_app_id,
         github_pem_path=github_pem_path,
         github_installation_id=github_installation_id,
