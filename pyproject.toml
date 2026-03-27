@@ -14,6 +14,7 @@ dependencies = [
     "python-bcb>=0.1.6",
     "typing-extensions>=4.0.0",
     "anthropic>=0.40.0",
+    "langfuse>=2.0",
 ]
 
 [build-system]

@@ -1,0 +1,29 @@
+services:
+  langfuse-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  langfuse:
+    image: langfuse/langfuse:2
+    restart: unless-stopped
+    depends_on:
+      - langfuse-db
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: bike-shop-langfuse-secret
+      SALT: bike-shop-langfuse-salt
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "3000:3000"
+
+volumes:
+  langfuse_pg_data:
