@@ -1,0 +1,48 @@
+# GitHub Pages Configuration
+title: "Bike Shop - Technical Documentation"
+description: "Sistema multi-agent para monitoramento de fundos de investimento"
+
+# Build settings
+markdown: kramdown
+highlighter: rouge
+theme: minima
+
+# Navigation
+navigation:
+  - title: "Home"
+    url: "/"
+  - title: "Especificação Técnica"
+    url: "/technical-specification"
+
+# GitHub repository
+github_username: nelsonfrugeri-tech
+repository: bike-shop
+
+# Enable syntax highlighting
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: 'highlight'
+
+# Plugins
+plugins:
+  - jekyll-feed
+  - jekyll-sitemap
+
+# Exclude from build
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - README.md
+
+# Collection settings
+collections_dir: .
+
+# Show excerpts
+show_excerpts: true
+
+# Future posts
+future: true
+
+# Timezone
+timezone: America/Sao_Paulo
