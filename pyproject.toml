@@ -2,12 +2,18 @@
 name = "bike-shop"
 version = "0.1.0"
 description = "Bike Shop team agents — multi-tool personas powered by Claude Code CLI"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "slack-bolt>=1.18",
     "slack-sdk>=3.27",
     "python-dotenv>=1.0",
     "PyJWT[crypto]>=2.8",
+    # Investment monitoring dependencies
+    "aiohttp>=3.9.0",
+    "pandas>=2.0.0",
+    "python-bcb>=0.1.6",
+    "typing-extensions>=4.0.0",
+    "anthropic>=0.40.0",
 ]
 
 [build-system]

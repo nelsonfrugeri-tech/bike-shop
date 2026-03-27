@@ -59,10 +59,26 @@ def _build_mcp_config(config: AgentConfig) -> str:
     return path
 
 
+def _read_project_context() -> str:
+    """Read MANIFEST.md from project root to give agents project awareness."""
+    manifest_path = os.path.join(_PROJECT_ROOT, "MANIFEST.md")
+    if not os.path.exists(manifest_path):
+        return ""
+    try:
+        with open(manifest_path) as f:
+            return f"\n\n--- PROJECT MANIFEST (keep this in mind at all times) ---\n{f.read()}\n--- END MANIFEST ---\n"
+    except OSError:
+        return ""
+
+
 def _build_prompt(config: AgentConfig, context: str, question: str,
                   memory: MemoryStore, github_token: str | None) -> str:
     """Assemble the full prompt from system prompt + instructions + context."""
     parts = [config.system_prompt]
+
+    # Project context — so agents know what project they're working on,
+    # what the mission is, and what problem they're solving
+    parts.append(_read_project_context())
 
     if github_token:
         parts.append(

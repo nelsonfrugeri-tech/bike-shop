@@ -57,7 +57,7 @@ class ClaudeProvider(LLMProvider):
                 capture_output=True,
                 text=True,
                 timeout=None,
-                cwd=os.path.expanduser("~"),
+                cwd=os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
                 env=env,
             )
             if result.returncode != 0:
