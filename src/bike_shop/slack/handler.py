@@ -28,7 +28,7 @@ from bike_shop.slack.context import (
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _BASE_MCP_CONFIG = os.path.join(_PROJECT_ROOT, "mcp.json")
 
 
