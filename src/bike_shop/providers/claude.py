@@ -4,8 +4,10 @@ import json
 import logging
 import os
 import subprocess
+import time
 
 from bike_shop.config import AgentConfig
+from bike_shop.observability import Tracer
 from bike_shop.providers import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -13,6 +15,14 @@ logger = logging.getLogger(__name__)
 
 class ClaudeProvider(LLMProvider):
     """Calls Claude via the claude CLI."""
+
+    def __init__(self) -> None:
+        self._tracers: dict[str, Tracer] = {}
+
+    def _get_tracer(self, agent_name: str) -> Tracer:
+        if agent_name not in self._tracers:
+            self._tracers[agent_name] = Tracer(agent_name)
+        return self._tracers[agent_name]
 
     def call(
         self,
@@ -26,6 +36,7 @@ class ClaudeProvider(LLMProvider):
         github_token: str | None = None,
     ) -> tuple[str, str | None]:
         model_id = model_override or config.model_id
+        tracer = self._get_tracer(config.name)
 
         cmd = [
             "claude", "-p", prompt,
@@ -49,6 +60,7 @@ class ClaudeProvider(LLMProvider):
             env["GH_TOKEN"] = github_token
 
         logger.debug("[%s] Calling Claude CLI (model=%s)...", config.name, model_id)
+        start_time = time.time()
 
         try:
             result = subprocess.run(
@@ -60,19 +72,40 @@ class ClaudeProvider(LLMProvider):
                 cwd=os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
                 env=env,
             )
+            duration_ms = (time.time() - start_time) * 1000
+
             if result.returncode != 0:
                 logger.error("Claude CLI failed (rc=%d): %s", result.returncode, result.stderr.strip())
+                tracer.trace_error(error=result.stderr.strip()[:500], context=prompt[-500:])
 
-            return self._parse_response(result.stdout)
+            response, new_session_id, usage = self._parse_response(result.stdout)
+
+            tracer.trace_call(
+                prompt=prompt,
+                response=response,
+                model=model_id,
+                duration_ms=duration_ms,
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                tools_used=usage.get("tools_used"),
+                session_id=new_session_id,
+            )
+
+            return response, new_session_id
 
         except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
             logger.error("Claude CLI error: %s", e)
+            tracer.trace_error(error=str(e), context=prompt[-500:])
             return "(error)", None
 
-    def _parse_response(self, stdout: str) -> tuple[str, str | None]:
-        """Parse stream-json output. Returns (response_text, session_id)."""
+    def _parse_response(self, stdout: str) -> tuple[str, str | None, dict]:
+        """Parse stream-json output. Returns (response_text, session_id, usage)."""
         response = ""
         new_session_id = None
+        tools_used = []
+        input_tokens = None
+        output_tokens = None
 
         for line in stdout.splitlines():
             try:
@@ -86,10 +119,26 @@ class ClaudeProvider(LLMProvider):
                     texts = [c["text"] for c in content if c.get("type") == "text"]
                     if texts:
                         response = "\n".join(texts).strip()
+
+                    # Extract tool uses
+                    for c in content:
+                        if c.get("type") == "tool_use":
+                            tools_used.append(c.get("name", "unknown"))
+
+                    # Extract usage stats
+                    usage = event.get("message", {}).get("usage", {})
+                    if usage:
+                        input_tokens = usage.get("input_tokens", input_tokens)
+                        output_tokens = usage.get("output_tokens", output_tokens)
+
             except (ValueError, KeyError):
                 continue
 
         if not response:
             response = "..."
 
-        return response, new_session_id
+        return response, new_session_id, {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tools_used": tools_used,
+        }
