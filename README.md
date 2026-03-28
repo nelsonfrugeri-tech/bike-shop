@@ -1,341 +1,188 @@
 # bike-shop
 
-Multi-agent team powered by [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) and Slack. Three AI personas collaborate in Slack channels with persistent memory, session continuity, and access to external tools (Notion, Trello, GitHub, draw.io, Excalidraw).
+Multi-agent team platform powered by [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) and Slack. AI coding agents collaborate in Slack channels under a project lead's orchestration, with persistent memory, full observability via Langfuse, and access to external tools.
+
+## How It Works
+
+```
+Project Lead (Slack)
+    │
+    ├── @Mr. Robot    ─┐
+    ├── @Elliot Alderson ├── bike-shop (Python) ── Claude Code CLI ── LLM
+    └── @Tyrell Wellick ─┘         │                    │
+                                   │               MCP Servers
+                               Langfuse          (Notion, draw.io,
+                            (observability)       Excalidraw, GitHub)
+```
 
 ## Agents
 
-| Agent | Role | Persona |
-|-------|------|---------|
-| **Mr. Robot** | Software Architect | Direct, blunt, questions every design decision. Zero tolerance for over-engineering. |
-| **Elliot Alderson** | Developer | Obsesses over clean code and security. Prefers concrete code over abstract discussions. |
-| **Tyrell Wellick** | Technical PM | Organized, strategic, obsessed with execution. Bullet points, priorities, deadlines. |
+Three equal coding agents. No personas, no hierarchy between them. The project lead orchestrates.
 
-## Architecture
+| Agent | Name | Slack Bot |
+|-------|------|-----------|
+| Mr. Robot | Coding agent | Separate Slack app |
+| Elliot Alderson | Coding agent | Separate Slack app |
+| Tyrell Wellick | Coding agent | Separate Slack app |
+
+Each agent can invoke specialized sub-agents from `~/.claude/agents/` (architect, review-py, dev-py, sentinel, etc.) depending on the task.
+
+## Key Features
+
+- **Project lead orchestration** — Agents wait for instructions, ask before executing, tag the project lead for decisions
+- **Agent-to-agent limit** — Max 5 interactions per thread, enforced in code (anti-loop)
+- **JSON memory** — Auto-records messages, saves summaries every 10 messages via haiku
+- **Session continuity** — Slack threads map to Claude sessions via `--resume` (24h TTL)
+- **Model switching** — Sonnet by default, Opus on demand ("think deeply") or auto-escalation (`[DEEP_THINK]`)
+- **Full observability** — Every LLM call traced to Langfuse: input, output, tokens, tools, thinking, errors
+- **Workspace isolation** — Agents operate only within `AGENT_WORKSPACE` directory
+- **GitHub App auth** — Each agent has its own GitHub identity (JWT tokens, auto-refresh)
+- **PR code review** — Agents tag teammates for review when opening PRs
+- **Non-substantive response suppression** — "No response requested" messages are silenced
+
+## Architecture (SOLID)
 
 ```
-Slack (Socket Mode) → bike-shop Python app → Claude Code CLI (subprocess)
-                                                    ↓
-                                              MCP Servers (Notion, Trello, draw.io, Excalidraw)
-                                                    ↓
-                                              GitHub (via gh CLI + GitHub App tokens)
+src/bike_shop/
+├── main.py                  # CLI entrypoint, process management
+├── config.py                # AgentConfig, MODEL_MAP, env loading
+├── agents.py                # Agent prompts and common rules
+├── memory.py                # JSON-based memory (messages, decisions, summaries)
+├── observability.py         # Langfuse tracer (traces, generations, spans)
+├── github_auth.py           # GitHub App JWT auth
+├── session.py               # Session tracking per Slack thread
+├── model_switch.py          # Deep think triggers and escalation
+├── handlers.py              # Backward-compatible wrapper
+├── providers/
+│   ├── __init__.py          # LLMProvider ABC (provider-agnostic)
+│   └── claude.py            # ClaudeProvider (Claude CLI implementation)
+└── slack/
+    ├── context.py           # Thread context, mentions, user resolution
+    └── handler.py           # SlackAgentHandler (orchestrates everything)
 ```
 
-**Key features:**
-- **Conversation memory** — each Slack thread maps to a Claude session via `--resume`, preserving context across messages (24h TTL)
-- **Persistent knowledge** — each agent has a `MEMORY.md` file loaded via `--append-system-prompt-file`, where it stores decisions, patterns, and learnings
-- **Resilience** — agents save progress before long operations and recover from tool failures without losing context
-- **Async processing** — messages are handled in background threads so the bot stays responsive
-- **Team mentions** — agents use proper Slack `<@USER_ID>` mentions to notify each other
-- **No timeout** — Claude CLI runs without time limit, agents work until done
+## Getting Started
 
-## Getting Started (Step-by-Step)
-
-### 1. Prerequisites
-
-Install these before anything else:
+### Prerequisites
 
 | Tool | Version | Install |
 |------|---------|---------|
-| **Python** | 3.11+ | `brew install python@3.12` or [pyenv](https://github.com/pyenv/pyenv) |
-| **uv** | latest | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| **Claude Code CLI** | latest | `npm install -g @anthropic-ai/claude-code` then `claude auth login` |
-| **gh CLI** | latest | `brew install gh` then `gh auth login` (needed for GitHub App integration) |
+| Python | 3.13+ | `brew install python@3.13` |
+| uv | latest | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Claude Code CLI | latest | `npm install -g @anthropic-ai/claude-code` |
+| Docker | latest | [Docker Desktop](https://www.docker.com/products/docker-desktop/) (for Langfuse) |
 
-### 2. Create Slack Apps (one per agent)
-
-Each agent is a **separate Slack App** with its own identity, avatar, and tokens. This is what allows them to appear as different "people" in Slack and mention each other.
-
-You need to create **3 apps**. Repeat the steps below for each:
-
-| App Name | Env Prefix | Description |
-|----------|------------|-------------|
-| `Mr. Robot` | `MR_ROBOT_` | Software Architect persona |
-| `Elliot Alderson` | `ELLIOT_` | Developer persona |
-| `Tyrell Wellick` | `TYRELL_` | Technical PM persona |
-
-#### 2.1 Create the App
-
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
-2. **App Name**: use the agent name exactly (e.g., `Elliot Alderson`)
-3. **Workspace**: select your Slack workspace
-4. Go to **Basic Information** → **Display Information**:
-   - Set the app name, description, and optionally an avatar icon
-   - This is what users see in Slack — give each agent a distinct avatar
-
-#### 2.2 Enable Socket Mode
-
-Socket Mode allows the app to receive events via WebSocket (no public URL needed).
-
-1. Go to **Socket Mode** (left sidebar) → Toggle **Enable Socket Mode** ON
-2. You'll be prompted to create an **App-Level Token**:
-   - Token name: `socket` (or anything)
-   - Scope: `connections:write`
-   - Click **Generate**
-3. Copy the `xapp-1-...` token → this is your `{AGENT}_APP_TOKEN`
-
-#### 2.3 Configure OAuth & Permissions
-
-1. Go to **OAuth & Permissions** (left sidebar)
-2. Scroll to **Scopes** → **Bot Token Scopes** → Add these:
-
-| Scope | Why |
-|-------|-----|
-| `app_mentions:read` | Receive @mentions in channels |
-| `chat:write` | Send messages and replies |
-| `channels:history` | Read channel message history (for context) |
-| `channels:read` | List channels |
-| `groups:history` | Read private channel history |
-| `im:history` | Read DM history |
-| `im:read` | Read DM metadata |
-| `im:write` | Open and send DMs |
-| `users:read` | Resolve user IDs to display names |
-
-3. Scroll up → **Install App to Workspace** → **Allow**
-4. Copy the `xoxb-...` **Bot User OAuth Token** → this is your `{AGENT}_BOT_TOKEN`
-
-#### 2.4 Subscribe to Events
-
-1. Go to **Event Subscriptions** (left sidebar) → Toggle **Enable Events** ON
-2. Under **Subscribe to bot events**, add:
-   - `app_mention` — triggers when someone @mentions the bot
-   - `message.channels` — triggers on channel messages (for bot-to-bot interaction)
-   - `message.groups` — same for private channels
-   - `message.im` — triggers on direct messages
-
-3. Click **Save Changes** at the bottom
-
-#### 2.5 Enable App Home (for DMs)
-
-1. Go to **App Home** (left sidebar)
-2. Under **Show Tabs**, enable **Messages Tab**
-3. Check **Allow users to send Slash commands and messages from the messages tab**
-
-This lets users DM the bot directly.
-
-#### 2.6 Invite to Channels
-
-After starting the agent, invite it to channels where you want it active:
-
-```
-/invite @Elliot Alderson
-/invite @Mr. Robot
-/invite @Tyrell Wellick
-```
-
-The agents only respond when **@mentioned** in channels. In DMs they respond to every message.
-
-### 3. Create GitHub Apps (optional, for GitHub integration)
-
-If you want agents to interact with GitHub (create issues, PRs, comment on code), each agent gets its own GitHub App identity. This way commits and comments show the agent's name.
-
-Only create GitHub Apps for agents that need git access (e.g., Mr. Robot and Elliot — Tyrell as PM may not need one).
-
-#### 3.1 Create the App
-
-1. Go to [github.com/settings/apps](https://github.com/settings/apps) → **New GitHub App**
-2. Fill in:
-   - **GitHub App name**: `bike-shop-elliot` (must be globally unique on GitHub)
-   - **Homepage URL**: your repo URL or `https://github.com/your-org`
-   - **Webhook**: uncheck **Active** (we don't need webhooks, agents use polling)
-3. **Permissions** → **Repository permissions**:
-   - `Contents`: Read & write (read code, create branches)
-   - `Issues`: Read & write (create/comment issues)
-   - `Pull requests`: Read & write (create/review PRs)
-   - `Metadata`: Read-only (always required)
-4. **Where can this app be installed?** → **Only on this account**
-5. Click **Create GitHub App**
-6. Note the **App ID** (shown at the top of the app settings page) → this is `{AGENT}_GITHUB_APP_ID`
-
-#### 3.2 Generate Private Key
-
-1. On the app settings page, scroll to **Private keys**
-2. Click **Generate a private key** — a `.pem` file will be downloaded
-3. Move it to a secure location:
-
-```bash
-mv ~/Downloads/your-app.2026-03-26.private-key.pem ~/.ssh/bike-shop-elliot-alderson.pem
-chmod 600 ~/.ssh/bike-shop-elliot-alderson.pem
-```
-
-4. Set the path in `.env`: `ELLIOT_GITHUB_PEM_PATH=~/.ssh/bike-shop-elliot-alderson.pem`
-
-#### 3.3 Install the App
-
-1. Go to your app settings → **Install App** (left sidebar)
-2. Click **Install** → select your organization or personal account
-3. Choose **Only select repositories** → pick the repos the agent should access
-4. Click **Install**
-5. After installing, the URL will contain the **Installation ID** (the number at the end of the URL: `https://github.com/settings/installations/119203607`) → this is `{AGENT}_GITHUB_INSTALLATION_ID`
-
-#### 3.4 How it works at runtime
-
-The app generates short-lived tokens (10min) using JWT + the private key. The token is passed as `GH_TOKEN` env var to the Claude CLI subprocess, so the agent uses `gh` CLI commands authenticated as itself. Token refresh is automatic.
-
-### 4. Clone and Install
+### 1. Clone and Install
 
 ```bash
 git clone https://github.com/nelsonfrugeri-tech/bike-shop.git
 cd bike-shop
-
-# Install as editable package via uv
-uv tool install -e .
-
-# Verify installation
+uv tool install -e . --python 3.13
 bike-shop --help
 ```
 
-### 5. Configure Environment
+### 2. Configure Environment
 
 ```bash
 cp .env.example .env
+# Edit .env with your Slack tokens, GitHub App IDs, and Langfuse keys
 ```
 
-Edit `.env` with your actual values:
+### 3. Create Slack Apps
+
+Each agent needs a separate Slack App. For each agent (Mr. Robot, Elliot Alderson, Tyrell Wellick):
+
+1. [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch
+2. Enable **Socket Mode** → generate App-Level Token (`xapp-...`)
+3. **OAuth & Permissions** → Add scopes: `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`, `groups:history`, `im:history`, `im:read`, `users:read`
+4. Install to workspace → copy Bot Token (`xoxb-...`)
+5. **Event Subscriptions** → Enable → subscribe to: `app_mention`, `message.channels`, `message.groups`, `message.im`
+6. **App Home** → Enable Messages Tab
+
+### 4. Create GitHub Apps (optional)
+
+For each agent that needs GitHub access:
+
+1. [github.com/settings/apps](https://github.com/settings/apps) → New GitHub App
+2. Permissions: Contents (write), Issues (write), Pull requests (write), Pages (write), Metadata (read)
+3. Generate private key → move to `~/.ssh/bike-shop-{agent}.pem`
+4. Install on selected repositories
+
+### 5. Start Langfuse (optional)
 
 ```bash
-# Slack tokens (from step 2)
-MR_ROBOT_BOT_TOKEN=xoxb-your-actual-token
-MR_ROBOT_APP_TOKEN=xapp-your-actual-token
-# ... same for ELLIOT_ and TYRELL_
-
-# GitHub App (from step 3, optional)
-MR_ROBOT_GITHUB_APP_ID=your-app-id
-MR_ROBOT_GITHUB_PEM_PATH=~/.ssh/bike-shop-mr-robot.pem
-MR_ROBOT_GITHUB_INSTALLATION_ID=your-installation-id
-
-# MCP service keys (optional)
-NOTION_API_KEY=your-notion-integration-token
-TRELLO_API_KEY=your-trello-api-key
-TRELLO_TOKEN=your-trello-token
+docker compose up -d
+# Open http://localhost:3000, create account, create project, get API keys
+# Add keys to .env: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 ```
 
-### 6. Install MCP Servers
-
-The agents use MCP (Model Context Protocol) to interact with external tools. Install the servers you need:
-
-```bash
-# Required for Notion integration
-uv tool install mcp-notion
-
-# Required for Trello integration
-uv tool install mcp-trello
-
-# Required for architecture diagrams
-uv tool install drawio-mcp
-uv tool install excalidraw-mcp
-```
-
-The MCP config (`mcp.json`) uses `${VAR}` placeholders that are resolved from your `.env` at runtime.
-
-### 7. Create Memory Directories
-
-Each agent has persistent memory stored in markdown files:
-
-```bash
-mkdir -p ~/.claude/workspace/bike-shop/memory/{elliot,mr-robot,tyrell}
-
-# Create initial memory files
-echo "# elliot - Memory" > ~/.claude/workspace/bike-shop/memory/elliot/MEMORY.md
-echo "# mr-robot - Memory" > ~/.claude/workspace/bike-shop/memory/mr-robot/MEMORY.md
-echo "# tyrell - Memory" > ~/.claude/workspace/bike-shop/memory/tyrell/MEMORY.md
-```
-
-These files are loaded into every Claude CLI call and the agents append their learnings to them.
-
-### 8. Run
+### 6. Run
 
 ```bash
 # Start a single agent
-bike-shop agent:elliot
+bike-shop agent:mr-robot
 
-# Start all agents at once
+# Start all agents
 bike-shop agent:all
 
-# Check who's running
+# Check status
 bike-shop --status
 
 # Stop an agent
-bike-shop --stop agent:elliot
-```
-
-### 9. Test
-
-1. Go to your Slack workspace
-2. Invite one of the bots to a channel (e.g., `/invite @Elliot Alderson`)
-3. Mention the bot: `@Elliot Alderson hello, can you hear me?`
-4. The bot should respond in the thread
-5. Send another message in the **same thread** — the bot remembers context (via `--resume`)
-6. Ask the bot to save something to memory — check `~/.claude/workspace/bike-shop/memory/elliot/MEMORY.md`
-
-## How It Works
-
-### Message Flow
-
-1. **Slack event** arrives via Socket Mode (mention or DM)
-2. **Handler** spawns a background thread (non-blocking)
-3. Thread context is fetched from Slack API
-4. Session ID is looked up for the Slack thread (`/tmp/bike-shop/sessions-{agent}.json`)
-5. **Claude CLI** is called with: system prompt + memory instruction + resilience rules + team mentions + conversation context
-   - If resuming: `--resume <session_id>` is added
-   - Memory file: `--append-system-prompt-file MEMORY.md`
-   - MCP tools: `--mcp-config` with resolved env vars
-   - Output format: `--output-format stream-json` (to parse session_id)
-6. Session ID from Claude's response is stored for future thread messages
-7. Response is sent back to Slack thread
-
-### Memory System
-
-**Layer 1: Conversation Memory** — `--resume` maintains Claude session state per Slack thread (24h TTL)
-
-**Layer 2: Persistent Knowledge** — `MEMORY.md` files survive across sessions. Agents are instructed to:
-- Save decisions, patterns, and learnings
-- Write checkpoints before long operations
-- Read memory when resuming work
-- Format entries with timestamps: `## [YYYY-MM-DD HH:MM] Topic`
-
-### Resilience
-
-Agents are instructed to handle tool failures gracefully:
-- Save progress to `MEMORY.md` before long operations
-- If a tool times out, note the failure and continue with the next step
-- Always read `MEMORY.md` when resuming to recover context
-- No subprocess timeout — Claude works until done
-
-## Project Structure
-
-```
-bike-shop/
-├── src/bike_shop/
-│   ├── main.py           # CLI entrypoint, process management, PID tracking
-│   ├── config.py          # Agent config, env loading, team mention resolution
-│   ├── handlers.py        # Slack events, Claude CLI calls, session tracking, memory
-│   ├── agents.py          # Persona definitions (system prompts)
-│   └── tools/             # Tool integrations (Slack, Notion placeholders)
-├── bin/                    # Legacy shell scripts (deprecated, kept for reference)
-├── mcp.json               # MCP server config (${VAR} placeholders resolved at runtime)
-├── .env.example           # Environment variable template
-├── .gitignore
-├── pyproject.toml
-└── README.md
+bike-shop --stop agent:mr-robot
 ```
 
 ## Environment Variables
 
-See [`.env.example`](.env.example) for the full list. All secrets are loaded from `.env` at runtime — nothing is hardcoded in source files.
-
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `{AGENT}_BOT_TOKEN` | Yes | Slack Bot OAuth token (`xoxb-...`) |
-| `{AGENT}_APP_TOKEN` | Yes | Slack App-level token for Socket Mode (`xapp-...`) |
-| `{AGENT}_GITHUB_APP_ID` | No | GitHub App ID for git operations |
-| `{AGENT}_GITHUB_PEM_PATH` | No | Path to GitHub App private key (`.pem`) |
+| `{AGENT}_BOT_TOKEN` | Yes | Slack Bot OAuth token |
+| `{AGENT}_APP_TOKEN` | Yes | Slack App-level token (Socket Mode) |
+| `{AGENT}_GITHUB_APP_ID` | No | GitHub App ID |
+| `{AGENT}_GITHUB_PEM_PATH` | No | Path to GitHub App private key |
 | `{AGENT}_GITHUB_INSTALLATION_ID` | No | GitHub App installation ID |
+| `PROJECT_LEAD_NAME` | No | Project lead's name (default: "the project lead") |
+| `PROJECT_LEAD_SLACK_ID` | No | Project lead's Slack user ID (for @mentions) |
+| `AGENT_WORKSPACE` | No | Directory agents operate in (default: $HOME) |
+| `LANGFUSE_PUBLIC_KEY` | No | Langfuse public key |
+| `LANGFUSE_SECRET_KEY` | No | Langfuse secret key |
+| `LANGFUSE_HOST` | No | Langfuse host (default: http://localhost:3000) |
 | `NOTION_API_KEY` | No | Notion integration token |
-| `TRELLO_API_KEY` | No | Trello API key |
-| `TRELLO_TOKEN` | No | Trello user token |
 
 Where `{AGENT}` is one of: `MR_ROBOT`, `ELLIOT`, `TYRELL`.
 
+## Observability
+
+Every LLM call sends a full trace to Langfuse:
+
+```
+Trace: Mr. Robot/call
+├── input: user message
+├── output: agent response
+├── tokens: input → output
+├── model, duration, tags
+│
+└── Generation: claude-cli
+    ├── Span: thinking-1 (chain of thought)
+    ├── Span: tool/Bash (git checkout -b ...)
+    ├── Span: tool/Write (src/schema.py)
+    ├── Span: tool/Bash (pytest tests/)
+    └── Span: error-1 (if any)
+```
+
+Use the `sentinel` agent (`claude --agent sentinel`) to query Langfuse interactively.
+
+## Team Process
+
+See [MANIFEST.md](MANIFEST.md) for the full team process. Summary:
+
+1. **Discovery** — Project lead brings a problem, agents discuss and propose
+2. **Documentation** — Write decisions on GitHub Pages
+3. **Issues** — Create GitHub Issues from documentation
+4. **Development** — Agents code, test, and open PRs
+5. **Code Review** — All agents review every PR
+6. **Validation** — Project lead tests as client
+
 ## License
 
-Private project.
+MIT
