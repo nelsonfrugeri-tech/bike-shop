@@ -88,7 +88,10 @@ class ClaudeProvider(LLMProvider):
                 duration_ms=duration_ms,
                 input_tokens=usage.get("input_tokens"),
                 output_tokens=usage.get("output_tokens"),
-                tools_used=usage.get("tools_used"),
+                tools=usage.get("tools"),
+                tool_results=usage.get("tool_results"),
+                thinking=usage.get("thinking"),
+                errors=usage.get("errors"),
                 session_id=new_session_id,
             )
 
@@ -101,36 +104,68 @@ class ClaudeProvider(LLMProvider):
             return "(error)", None
 
     def _parse_response(self, stdout: str) -> tuple[str, str | None, dict]:
-        """Parse stream-json output. Returns (response_text, session_id, usage)."""
+        """Parse ALL stream-json events. Returns (response_text, session_id, full_usage)."""
         response = ""
         new_session_id = None
-        tools_used = []
-        input_tokens = None
-        output_tokens = None
+        tools = []          # each tool_use with name, input, id
+        tool_results = []   # each tool_result with output
+        thinking = []       # thinking blocks
+        errors = []         # error events
+        input_tokens = 0
+        output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
 
         for line in stdout.splitlines():
             try:
                 event = json.loads(line)
+                event_type = event.get("type", "")
 
-                if event.get("type") == "system" and event.get("session_id"):
+                # System events (session id)
+                if event_type == "system" and event.get("session_id"):
                     new_session_id = event["session_id"]
 
-                if event.get("type") == "assistant":
+                # Assistant messages
+                if event_type == "assistant":
                     content = event.get("message", {}).get("content", [])
-                    texts = [c["text"] for c in content if c.get("type") == "text"]
-                    if texts:
-                        response = "\n".join(texts).strip()
+                    for block in content:
+                        block_type = block.get("type", "")
 
-                    # Extract tool uses
-                    for c in content:
-                        if c.get("type") == "tool_use":
-                            tools_used.append(c.get("name", "unknown"))
+                        if block_type == "text":
+                            response = block.get("text", "").strip()
 
-                    # Extract usage stats
+                        elif block_type == "tool_use":
+                            tools.append({
+                                "id": block.get("id", ""),
+                                "name": block.get("name", "unknown"),
+                                "input": json.dumps(block.get("input", {}))[:1000],
+                            })
+
+                        elif block_type == "thinking":
+                            thinking.append(block.get("thinking", "")[:500])
+
+                    # Usage from assistant message
                     usage = event.get("message", {}).get("usage", {})
                     if usage:
-                        input_tokens = usage.get("input_tokens", input_tokens)
-                        output_tokens = usage.get("output_tokens", output_tokens)
+                        input_tokens += usage.get("input_tokens", 0)
+                        output_tokens += usage.get("output_tokens", 0)
+                        cache_read_tokens += usage.get("cache_read_input_tokens", 0)
+                        cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
+
+                # Tool results
+                if event_type == "result" and event.get("subtype") == "tool_result":
+                    tool_results.append({
+                        "tool_use_id": event.get("tool_use_id", ""),
+                        "content": json.dumps(event.get("content", ""))[:1000],
+                        "is_error": event.get("is_error", False),
+                    })
+
+                # Error events
+                if event_type == "error":
+                    errors.append({
+                        "message": event.get("error", {}).get("message", str(event)),
+                        "type": event.get("error", {}).get("type", "unknown"),
+                    })
 
             except (ValueError, KeyError):
                 continue
@@ -141,5 +176,10 @@ class ClaudeProvider(LLMProvider):
         return response, new_session_id, {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "tools_used": tools_used,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+            "tools": tools,
+            "tool_results": tool_results,
+            "thinking": thinking,
+            "errors": errors,
         }
