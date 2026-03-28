@@ -29,6 +29,7 @@ class ClaudeProvider(LLMProvider):
         config: AgentConfig,
         prompt: str,
         *,
+        user_message: str = "",
         model_override: str | None = None,
         session_id: str | None = None,
         memory_file: str | None = None,
@@ -81,7 +82,7 @@ class ClaudeProvider(LLMProvider):
             response, new_session_id, usage = self._parse_response(result.stdout)
 
             tracer.trace_call(
-                prompt=prompt,
+                user_message=user_message or prompt[-500:],
                 response=response,
                 model=model_id,
                 duration_ms=duration_ms,

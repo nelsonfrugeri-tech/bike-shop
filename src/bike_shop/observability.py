@@ -1,56 +1,66 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+import urllib.request
+import uuid
+from base64 import b64encode
 
 logger = logging.getLogger(__name__)
 
-# Lazy-loaded Langfuse client
-_langfuse = None
 
-
-def _get_langfuse():
-    """Get or create a Langfuse client. Returns None if not configured."""
-    global _langfuse
-    if _langfuse is not None:
-        return _langfuse
-
+def _get_config() -> tuple[str, str] | None:
+    """Returns (host, auth_header) or None if not configured."""
     public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
     secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
     host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
 
     if not public_key or not secret_key:
-        logger.debug("Langfuse not configured — observability disabled")
         return None
 
+    credentials = b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    return host, f"Basic {credentials}"
+
+
+def _post(path: str, body: dict) -> bool:
+    """Send a POST request to Langfuse API. Returns True on success."""
+    config = _get_config()
+    if not config:
+        return False
+
+    host, auth = config
     try:
-        from langfuse import Langfuse
-        _langfuse = Langfuse(
-            public_key=public_key,
-            secret_key=secret_key,
-            host=host,
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            f"{host}{path}",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": auth,
+            },
         )
-        logger.info("Langfuse connected at %s", host)
-        return _langfuse
-    except ImportError:
-        logger.warning("langfuse package not installed — pip install langfuse")
-        return None
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200 or resp.status == 207
     except Exception as e:
-        logger.error("Failed to connect to Langfuse: %s", e)
-        return None
+        logger.debug("Langfuse request failed: %s", e)
+        return False
 
 
 class Tracer:
-    """Records LLM call traces to Langfuse."""
+    """Records LLM call traces to Langfuse via REST API."""
 
     def __init__(self, agent_name: str) -> None:
         self._agent_name = agent_name
+        self._enabled = _get_config() is not None
+        if self._enabled:
+            logger.info("[%s] Langfuse tracing enabled", agent_name)
 
     def trace_call(
         self,
         *,
-        prompt: str,
+        user_message: str,
         response: str,
         model: str,
         duration_ms: float,
@@ -60,60 +70,87 @@ class Tracer:
         thread_ts: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        """Record a single LLM call to Langfuse."""
-        langfuse = _get_langfuse()
-        if not langfuse:
+        if not self._enabled:
             return
 
-        try:
-            trace = langfuse.trace(
-                name=f"{self._agent_name}/call",
-                user_id=self._agent_name,
-                session_id=session_id or thread_ts,
-                metadata={
-                    "agent": self._agent_name,
+        trace_id = str(uuid.uuid4())
+        gen_id = str(uuid.uuid4())
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        batch = [
+            {
+                "id": str(uuid.uuid4()),
+                "type": "trace-create",
+                "timestamp": now,
+                "body": {
+                    "id": trace_id,
+                    "name": f"{self._agent_name}/call",
+                    "userId": self._agent_name,
+                    "sessionId": session_id or thread_ts,
+                    "input": user_message,
+                    "output": response,
+                    "metadata": {
+                        "agent": self._agent_name,
+                        "model": model,
+                        "thread_ts": thread_ts,
+                        "tools_used": tools_used or [],
+                    },
+                },
+            },
+            {
+                "id": str(uuid.uuid4()),
+                "type": "generation-create",
+                "timestamp": now,
+                "body": {
+                    "id": gen_id,
+                    "traceId": trace_id,
+                    "name": "claude-cli",
                     "model": model,
-                    "thread_ts": thread_ts,
-                    "tools_used": tools_used or [],
+                    "input": user_message,
+                    "output": response,
+                    "usage": {
+                        "input": input_tokens or 0,
+                        "output": output_tokens or 0,
+                    },
+                    "metadata": {
+                        "duration_ms": round(duration_ms),
+                        "tools_used": tools_used or [],
+                    },
+                    "completionStartTime": now,
                 },
-            )
+            },
+        ]
 
-            trace.generation(
-                name="claude-cli",
-                model=model,
-                input=prompt[-2000:],  # truncate to save space
-                output=response[-2000:],
-                usage={
-                    "input": input_tokens,
-                    "output": output_tokens,
-                },
-                metadata={
-                    "duration_ms": duration_ms,
-                    "tools_used": tools_used or [],
-                },
-            )
-
-            langfuse.flush()
-        except Exception as e:
-            logger.warning("[%s] Failed to send trace to Langfuse: %s", self._agent_name, e)
+        ok = _post("/api/public/ingestion", {"batch": batch})
+        if ok:
+            logger.debug("[%s] Trace sent to Langfuse", self._agent_name)
+        else:
+            logger.warning("[%s] Failed to send trace to Langfuse", self._agent_name)
 
     def trace_error(self, *, error: str, context: str = "") -> None:
-        """Record an error to Langfuse."""
-        langfuse = _get_langfuse()
-        if not langfuse:
+        if not self._enabled:
             return
 
-        try:
-            langfuse.trace(
-                name=f"{self._agent_name}/error",
-                user_id=self._agent_name,
-                metadata={
-                    "agent": self._agent_name,
-                    "error": error,
-                    "context": context[:500],
+        trace_id = str(uuid.uuid4())
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+        batch = [
+            {
+                "id": str(uuid.uuid4()),
+                "type": "trace-create",
+                "timestamp": now,
+                "body": {
+                    "id": trace_id,
+                    "name": f"{self._agent_name}/error",
+                    "userId": self._agent_name,
+                    "metadata": {
+                        "agent": self._agent_name,
+                        "error": error[:500],
+                        "context": context[:500],
+                    },
+                    "tags": ["error"],
                 },
-                level="ERROR",
-            )
-            langfuse.flush()
-        except Exception as e:
-            logger.warning("[%s] Failed to send error trace: %s", self._agent_name, e)
+            },
+        ]
+
+        _post("/api/public/ingestion", {"batch": batch})

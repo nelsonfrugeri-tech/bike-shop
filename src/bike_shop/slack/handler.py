@@ -144,6 +144,7 @@ class SlackAgentHandler:
         response, new_session_id = self._provider.call(
             config,
             prompt,
+            user_message=question,
             model_override=model_override,
             session_id=session_id,
             memory_file=None,
