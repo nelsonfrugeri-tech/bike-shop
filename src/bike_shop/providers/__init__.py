@@ -14,6 +14,7 @@ class LLMProvider(ABC):
         config: AgentConfig,
         prompt: str,
         *,
+        user_message: str = "",
         model_override: str | None = None,
         session_id: str | None = None,
         memory_file: str | None = None,
