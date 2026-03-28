@@ -49,7 +49,7 @@ def _post(path: str, body: dict) -> bool:
 
 
 class Tracer:
-    """Records LLM call traces to Langfuse via REST API."""
+    """Records full LLM call traces to Langfuse via REST API."""
 
     def __init__(self, agent_name: str) -> None:
         self._agent_name = agent_name
@@ -66,7 +66,10 @@ class Tracer:
         duration_ms: float,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
-        tools_used: list[str] | None = None,
+        tools: list[dict] | None = None,
+        tool_results: list[dict] | None = None,
+        thinking: list[str] | None = None,
+        errors: list[dict] | None = None,
         thread_ts: str | None = None,
         session_id: str | None = None,
     ) -> None:
@@ -77,53 +80,136 @@ class Tracer:
         gen_id = str(uuid.uuid4())
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-        batch = [
-            {
-                "id": str(uuid.uuid4()),
-                "type": "trace-create",
-                "timestamp": now,
-                "body": {
-                    "id": trace_id,
-                    "name": f"{self._agent_name}/call",
-                    "userId": self._agent_name,
-                    "sessionId": session_id or thread_ts,
-                    "input": user_message,
-                    "output": response,
-                    "metadata": {
-                        "agent": self._agent_name,
-                        "model": model,
-                        "thread_ts": thread_ts,
-                        "tools_used": tools_used or [],
-                    },
-                },
-            },
-            {
-                "id": str(uuid.uuid4()),
-                "type": "generation-create",
-                "timestamp": now,
-                "body": {
-                    "id": gen_id,
-                    "traceId": trace_id,
-                    "name": "claude-cli",
+        batch = []
+
+        # 1. Trace (container)
+        batch.append({
+            "id": str(uuid.uuid4()),
+            "type": "trace-create",
+            "timestamp": now,
+            "body": {
+                "id": trace_id,
+                "name": f"{self._agent_name}/call",
+                "userId": self._agent_name,
+                "sessionId": session_id or thread_ts,
+                "input": user_message,
+                "output": response,
+                "metadata": {
+                    "agent": self._agent_name,
                     "model": model,
-                    "input": user_message,
-                    "output": response,
-                    "usage": {
-                        "input": input_tokens or 0,
-                        "output": output_tokens or 0,
-                    },
-                    "metadata": {
-                        "duration_ms": round(duration_ms),
-                        "tools_used": tools_used or [],
-                    },
-                    "completionStartTime": now,
+                    "duration_ms": round(duration_ms),
+                    "thread_ts": thread_ts,
+                    "tool_count": len(tools or []),
+                    "has_thinking": bool(thinking),
+                    "has_errors": bool(errors),
                 },
+                "tags": ["error"] if errors else [],
             },
-        ]
+        })
+
+        # 2. Generation (LLM call)
+        batch.append({
+            "id": str(uuid.uuid4()),
+            "type": "generation-create",
+            "timestamp": now,
+            "body": {
+                "id": gen_id,
+                "traceId": trace_id,
+                "name": "claude-cli",
+                "model": model,
+                "input": user_message,
+                "output": response,
+                "usage": {
+                    "input": input_tokens or 0,
+                    "output": output_tokens or 0,
+                },
+                "metadata": {
+                    "duration_ms": round(duration_ms),
+                },
+                "completionStartTime": now,
+            },
+        })
+
+        # 3. Thinking spans
+        for i, thought in enumerate(thinking or []):
+            batch.append({
+                "id": str(uuid.uuid4()),
+                "type": "span-create",
+                "timestamp": now,
+                "body": {
+                    "id": str(uuid.uuid4()),
+                    "traceId": trace_id,
+                    "parentObservationId": gen_id,
+                    "name": f"thinking-{i+1}",
+                    "input": thought,
+                    "metadata": {"type": "thinking"},
+                },
+            })
+
+        # 4. Tool use spans
+        for tool in (tools or []):
+            tool_span_id = str(uuid.uuid4())
+            batch.append({
+                "id": str(uuid.uuid4()),
+                "type": "span-create",
+                "timestamp": now,
+                "body": {
+                    "id": tool_span_id,
+                    "traceId": trace_id,
+                    "parentObservationId": gen_id,
+                    "name": f"tool/{tool['name']}",
+                    "input": tool.get("input", ""),
+                    "metadata": {
+                        "type": "tool_use",
+                        "tool_name": tool["name"],
+                        "tool_use_id": tool.get("id", ""),
+                    },
+                },
+            })
+
+            # Find matching result
+            for result in (tool_results or []):
+                if result.get("tool_use_id") == tool.get("id"):
+                    batch.append({
+                        "id": str(uuid.uuid4()),
+                        "type": "span-update",
+                        "timestamp": now,
+                        "body": {
+                            "id": tool_span_id,
+                            "traceId": trace_id,
+                            "output": result.get("content", ""),
+                            "metadata": {
+                                "type": "tool_use",
+                                "tool_name": tool["name"],
+                                "is_error": result.get("is_error", False),
+                            },
+                        },
+                    })
+                    break
+
+        # 5. Error spans
+        for i, error in enumerate(errors or []):
+            batch.append({
+                "id": str(uuid.uuid4()),
+                "type": "span-create",
+                "timestamp": now,
+                "body": {
+                    "id": str(uuid.uuid4()),
+                    "traceId": trace_id,
+                    "parentObservationId": gen_id,
+                    "name": f"error-{i+1}",
+                    "input": error.get("message", ""),
+                    "metadata": {
+                        "type": "error",
+                        "error_type": error.get("type", "unknown"),
+                    },
+                    "level": "ERROR",
+                },
+            })
 
         ok = _post("/api/public/ingestion", {"batch": batch})
         if ok:
-            logger.debug("[%s] Trace sent to Langfuse", self._agent_name)
+            logger.debug("[%s] Full trace sent to Langfuse (%d events)", self._agent_name, len(batch))
         else:
             logger.warning("[%s] Failed to send trace to Langfuse", self._agent_name)
 
