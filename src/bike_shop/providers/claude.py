@@ -31,10 +31,12 @@ class ClaudeProvider(LLMProvider):
         *,
         user_message: str = "",
         model_override: str | None = None,
+        agent: str | None = None,
         session_id: str | None = None,
         memory_file: str | None = None,
         mcp_config: str | None = None,
         github_token: str | None = None,
+        router_meta: dict | None = None,
     ) -> tuple[str, str | None]:
         model_id = model_override or config.model_id
         tracer = self._get_tracer(config.name)
@@ -46,6 +48,9 @@ class ClaudeProvider(LLMProvider):
             "--verbose",
             "--model", model_id,
         ]
+
+        if agent:
+            cmd.extend(["--agent", agent])
 
         if mcp_config:
             cmd.extend(["--mcp-config", mcp_config])
@@ -93,6 +98,8 @@ class ClaudeProvider(LLMProvider):
                 thinking=usage.get("thinking"),
                 errors=usage.get("errors"),
                 session_id=new_session_id,
+                selected_agent=agent,
+                router_meta=router_meta,
             )
 
             return response, new_session_id

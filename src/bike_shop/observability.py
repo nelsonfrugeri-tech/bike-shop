@@ -72,6 +72,8 @@ class Tracer:
         errors: list[dict] | None = None,
         thread_ts: str | None = None,
         session_id: str | None = None,
+        selected_agent: str | None = None,
+        router_meta: dict | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -83,19 +85,26 @@ class Tracer:
         batch = []
 
         # 1. Trace (container)
+        trace_name = f"{self._agent_name}/call"
+        if selected_agent:
+            trace_name = f"{self._agent_name}/call/{selected_agent}"
+
         batch.append({
             "id": str(uuid.uuid4()),
             "type": "trace-create",
             "timestamp": now,
             "body": {
                 "id": trace_id,
-                "name": f"{self._agent_name}/call",
+                "name": trace_name,
                 "userId": self._agent_name,
                 "sessionId": session_id or thread_ts,
                 "input": user_message,
                 "output": response,
                 "metadata": {
                     "agent": self._agent_name,
+                    "selected_agent": selected_agent,
+                    "router_model": (router_meta or {}).get("model_name"),
+                    "router_reason": (router_meta or {}).get("reason"),
                     "model": model,
                     "duration_ms": round(duration_ms),
                     "thread_ts": thread_ts,
