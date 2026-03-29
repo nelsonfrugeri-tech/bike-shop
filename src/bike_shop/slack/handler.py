@@ -14,6 +14,7 @@ from bike_shop.agents import PROJECT_LEAD
 from bike_shop.config import AgentConfig
 from bike_shop.github_auth import GitHubAuth
 from bike_shop.memory import MemoryStore
+from bike_shop.memory_agent import MemoryAgent
 from bike_shop.model_switch import ModelSwitcher
 from bike_shop.providers import LLMProvider
 from bike_shop.router import SemanticRouter
@@ -92,12 +93,12 @@ def _read_project_context() -> str:
 
 
 def _build_prompt(config: AgentConfig, context: str, question: str,
-                  memory: MemoryStore, github_token: str | None) -> str:
+                  memory: MemoryStore, github_token: str | None,
+                  shared_memory: str = "") -> str:
     """Assemble the full prompt from system prompt + instructions + context."""
     parts = [config.system_prompt]
 
-    # Project context — so agents know what project they're working on,
-    # what the mission is, and what problem they're solving
+    # Project context
     parts.append(_read_project_context())
 
     if github_token:
@@ -108,10 +109,9 @@ def _build_prompt(config: AgentConfig, context: str, question: str,
             "Example: gh api repos/OWNER/REPO/issues -f title='...' -f body='...'"
         )
 
-    # Inject memory context (recent messages, decisions, summaries)
-    memory_context = memory.get_recent_context()
-    if memory_context:
-        parts.append(memory_context)
+    # Shared project memory from Mem0
+    if shared_memory:
+        parts.append(shared_memory)
 
     parts.append(memory.build_instruction())
     parts.append(build_mention_instruction(config.name))
@@ -132,6 +132,7 @@ class SlackAgentHandler:
         self._github = GitHubAuth(config)
         self._switcher = ModelSwitcher()
         self._router = SemanticRouter()
+        self._memory_agent = MemoryAgent()
 
     def _call_llm(self, context: str, question: str, thread_ts: str,
                   model_override: str | None = None, agent_override: str | None = None,
@@ -142,7 +143,9 @@ class SlackAgentHandler:
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
 
-        prompt = _build_prompt(config, context, question, self._memory, github_token)
+        # Recall relevant memories from Mem0 shared memory
+        shared_memory = self._memory_agent.recall(question)
+        prompt = _build_prompt(config, context, question, self._memory, github_token, shared_memory)
 
         response, new_session_id = self._provider.call(
             config,
@@ -238,6 +241,9 @@ class SlackAgentHandler:
                     reply = self._switcher.strip_marker(reply)
 
             logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
+
+            # Memory Agent — observe the exchange for fact extraction
+            self._memory_agent.observe(config.name, question, reply)
 
             # Suppress empty/no-action responses — don't waste Slack messages
             skip_phrases = {"no response requested", "no action needed", "nothing to do", "..."}
