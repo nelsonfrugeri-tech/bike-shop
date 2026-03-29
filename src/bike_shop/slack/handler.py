@@ -16,6 +16,7 @@ from bike_shop.github_auth import GitHubAuth
 from bike_shop.memory import MemoryStore
 from bike_shop.model_switch import ModelSwitcher
 from bike_shop.providers import LLMProvider
+from bike_shop.router import SemanticRouter
 from bike_shop.session import SessionStore
 from bike_shop.slack.context import (
     build_mention_instruction,
@@ -130,9 +131,11 @@ class SlackAgentHandler:
         self._memory = MemoryStore(config.agent_key)
         self._github = GitHubAuth(config)
         self._switcher = ModelSwitcher()
+        self._router = SemanticRouter()
 
     def _call_llm(self, context: str, question: str, thread_ts: str,
-                  model_override: str | None = None) -> str:
+                  model_override: str | None = None, agent_override: str | None = None,
+                  router_meta: dict | None = None) -> str:
         """Call the LLM provider and handle session tracking."""
         config = self._config
         mcp_config = _build_mcp_config(config)
@@ -146,10 +149,12 @@ class SlackAgentHandler:
             prompt,
             user_message=question,
             model_override=model_override,
+            agent=agent_override,
             session_id=session_id,
             memory_file=None,
             mcp_config=mcp_config,
             github_token=github_token,
+            router_meta=router_meta,
         )
 
         if new_session_id and thread_ts:
@@ -195,13 +200,30 @@ class SlackAgentHandler:
             # Record incoming message
             self._memory.record_message(question.split(": ", 1)[0], question)
 
+            # Semantic Router — decide agent + model
+            route = self._router.route(question)
+            agent_override = route.get("agent")
+            model_override = route.get("model")
+            router_model_name = route.get("model_name", "sonnet")
+            router_reason = route.get("reason", "")
+
+            logger.info("[%s] Router: agent=%s model=%s reason=%s",
+                        config.name, agent_override or "direct",
+                        router_model_name, router_reason)
+
+            # Manual trigger overrides router's model choice
             force_opus = self._switcher.is_manual_trigger(question)
-            model_override = config.opus_model_id if force_opus else None
-
             if force_opus:
-                logger.info("[%s] Project lead triggered deep thinking — using Opus", config.name)
+                model_override = config.opus_model_id
+                router_model_name = "opus (manual override)"
+                logger.info("[%s] Project lead override → Opus", config.name)
 
-            reply = self._call_llm(context, question, thread_ts, model_override=model_override)
+            reply = self._call_llm(context, question, thread_ts,
+                                   model_override=model_override,
+                                   agent_override=agent_override,
+                                   router_meta={"model_name": router_model_name,
+                                                "reason": router_reason,
+                                                "agent": agent_override})
 
             if self._switcher.has_marker(reply):
                 if not self._switcher.should_escalate(thread_ts):
