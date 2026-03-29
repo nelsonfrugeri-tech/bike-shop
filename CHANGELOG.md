@@ -62,8 +62,9 @@ All notable changes to this project will be documented in this file.
 - Router reason logged in Langfuse traces for full traceability
 - Manual override still works ("think deeply" → forces opus)
 
-### Memory Agent with Mem0- Shared semantic memory via Mem0 (replaces per-agent JSON files)
-- Qdrant (vector DB) + Ollama (nomic-embed-text, local, zero API cost)
+### Memory Agent with [Mem0](https://github.com/mem0ai/mem0)
+- Shared semantic memory via Mem0 (replaces per-agent JSON files)
+- [Qdrant](https://qdrant.tech/) (vector DB) + [Ollama](https://ollama.com/) ([nomic-embed-text](https://ollama.com/library/nomic-embed-text), 768 dims, local, zero API cost)
 - `observe()` after every response — Mem0 auto-extracts facts
 - `recall()` before every LLM call — semantic search for relevant context
 - All agents read/write to the same memory — no more silos
