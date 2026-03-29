@@ -55,6 +55,32 @@ All notable changes to this project will be documented in this file.
 - README.md: complete setup guide with Slack Apps, GitHub Apps, Langfuse
 - SRE Observability skill for Sentinel agent
 
-### Planned (v0.2.0)
-- Semantic Router: auto-select agent + model per message context ([#3](https://github.com/nelsonfrugeri-tech/bike-shop/issues/3))
-- Memory Agent with Mem0: shared memory, decision extraction, semantic search ([#4](https://github.com/nelsonfrugeri-tech/bike-shop/issues/4))
+## [v0.2.0] - 2026-03-29 (unreleased)
+
+### Semantic Router - Haiku-powered classifier that decides agent (spirit) + model per message
+- Automatic model selection: opus (deep thinking), sonnet (standard), haiku (simple)
+- Router reason logged in Langfuse traces for full traceability
+- Manual override still works ("think deeply" → forces opus)
+
+### Memory Agent with [Mem0](https://github.com/mem0ai/mem0)
+- Shared semantic memory via Mem0 (replaces per-agent JSON files)
+- [Qdrant](https://qdrant.tech/) (vector DB) + [Ollama](https://ollama.com/) ([nomic-embed-text](https://ollama.com/library/nomic-embed-text), 768 dims, local, zero API cost)
+- `observe()` after every response — Mem0 auto-extracts facts
+- `recall()` before every LLM call — semantic search for relevant context
+- All agents read/write to the same memory — no more silos
+- Migrated all previous agent memories into Mem0
+
+### Agent Behavior
+- Removed all agent personalities — pure software engineers
+- Think backwards: delivery → test → implementation
+- Agents have autonomy + tag teammates for PR reviews, opinions, blockers
+- Spirits & Bodies architecture: agents in `~/.claude/agents/` are agnostic spirits, Slack bots are bodies
+
+### Observability
+- Router decisions in Langfuse: selected_agent, router_model, router_reason
+- Sentinel agent with SRE skill (Google SRE book, observability principles)
+- Langfuse MCP tool (5 query tools for all agents)
+
+### Infrastructure
+- Docker Compose: added Qdrant + Ollama services
+- Oracle GitHub App for automated PR creation
