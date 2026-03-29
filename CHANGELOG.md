@@ -57,14 +57,12 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.2.0] - 2026-03-29 (unreleased)
 
-### Semantic Router ([#3](https://github.com/nelsonfrugeri-tech/bike-shop/issues/3))
-- Haiku-powered classifier that decides agent (spirit) + model per message
+### Semantic Router - Haiku-powered classifier that decides agent (spirit) + model per message
 - Automatic model selection: opus (deep thinking), sonnet (standard), haiku (simple)
 - Router reason logged in Langfuse traces for full traceability
 - Manual override still works ("think deeply" → forces opus)
 
-### Memory Agent with Mem0 ([#4](https://github.com/nelsonfrugeri-tech/bike-shop/issues/4))
-- Shared semantic memory via Mem0 (replaces per-agent JSON files)
+### Memory Agent with Mem0- Shared semantic memory via Mem0 (replaces per-agent JSON files)
 - Qdrant (vector DB) + Ollama (nomic-embed-text, local, zero API cost)
 - `observe()` after every response — Mem0 auto-extracts facts
 - `recall()` before every LLM call — semantic search for relevant context
