@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 import threading
 
 from slack_bolt import App
@@ -13,7 +12,6 @@ from slack_sdk import WebClient
 from bike_shop.agents import PROJECT_LEAD
 from bike_shop.config import AgentConfig
 from bike_shop.github_auth import GitHubAuth
-from bike_shop.memory import MemoryStore
 from bike_shop.memory_agent import MemoryAgent
 from bike_shop.model_switch import ModelSwitcher
 from bike_shop.providers import LLMProvider
@@ -71,9 +69,11 @@ def _build_mcp_config(config: AgentConfig) -> str:
 
     mcp = _resolve_env_vars(mcp)
 
+    cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "bike-shop")
+    os.makedirs(cache_dir, exist_ok=True)
     path = os.path.join(
-        tempfile.gettempdir(),
-        f"bike-shop-mcp-{config.name.lower().replace(' ', '-')}.json",
+        cache_dir,
+        f"mcp-{config.name.lower().replace(' ', '-')}.json",
     )
     with open(path, "w") as f:
         json.dump(mcp, f)
@@ -93,7 +93,7 @@ def _read_project_context() -> str:
 
 
 def _build_prompt(config: AgentConfig, context: str, question: str,
-                  memory: MemoryStore, github_token: str | None,
+                  github_token: str | None,
                   shared_memory: str = "") -> str:
     """Assemble the full prompt from system prompt + instructions + context."""
     parts = [config.system_prompt]
@@ -113,7 +113,6 @@ def _build_prompt(config: AgentConfig, context: str, question: str,
     if shared_memory:
         parts.append(shared_memory)
 
-    parts.append(memory.build_instruction())
     parts.append(build_mention_instruction(config.name))
     parts.append(f"\n\n--- CONVERSATION CONTEXT ---\n{context}")
     parts.append(f"\n\n--- NEW MESSAGE TO RESPOND ---\n{question}")
@@ -128,7 +127,6 @@ class SlackAgentHandler:
         self._config = config
         self._provider = provider
         self._session = SessionStore(config.agent_key)
-        self._memory = MemoryStore(config.agent_key)
         self._github = GitHubAuth(config)
         self._switcher = ModelSwitcher()
         self._router = SemanticRouter()
@@ -145,7 +143,7 @@ class SlackAgentHandler:
 
         # Recall relevant memories from Mem0 shared memory
         shared_memory = self._memory_agent.recall(question)
-        prompt = _build_prompt(config, context, question, self._memory, github_token, shared_memory)
+        prompt = _build_prompt(config, context, question, github_token, shared_memory)
 
         response, new_session_id = self._provider.call(
             config,
@@ -165,44 +163,11 @@ class SlackAgentHandler:
 
         return response
 
-    def _auto_summarize(self) -> None:
-        """Use a lightweight LLM call (haiku) to summarize recent messages."""
-        messages = self._memory._load_json(self._memory._messages_path)
-        if not messages:
-            return
-        recent = messages[-10:]
-        lines = [f"{m['user']}: {m['text']}" for m in recent]
-        conversation = "\n".join(lines)
-
-        summary_prompt = (
-            "Summarize this conversation in 3-5 bullet points. "
-            "Focus on: decisions made, tasks assigned, open questions. "
-            "Be concise. Output only the bullet points.\n\n"
-            f"{conversation}"
-        )
-
-        try:
-            from bike_shop.config import MODEL_MAP
-            summary, _ = self._provider.call(
-                self._config,
-                summary_prompt,
-                model_override=MODEL_MAP["haiku"],
-            )
-            self._memory.record_summary(summary)
-            logger.info("[%s] Auto-summary saved via haiku", self._config.name)
-        except Exception as e:
-            # Fallback: save raw messages as summary
-            self._memory.record_summary(f"Last 10 messages (raw):\n{conversation}")
-            logger.warning("[%s] Summary fallback (haiku failed): %s", self._config.name, e)
-
     def _process_and_reply(self, say, client: WebClient,
                            context: str, question: str, thread_ts: str) -> None:
         """Process LLM call in background thread and reply when done."""
         config = self._config
         try:
-            # Record incoming message
-            self._memory.record_message(question.split(": ", 1)[0], question)
-
             # Semantic Router — decide agent + model
             route = self._router.route(question)
             agent_override = route.get("agent")
@@ -252,10 +217,6 @@ class SlackAgentHandler:
             else:
                 say(reply, thread_ts=thread_ts)
 
-            # Record outgoing response and auto-summarize if needed
-            self._memory.record_message(config.name, reply)
-            if self._memory.needs_summary():
-                self._auto_summarize()
         except Exception as e:
             logger.error("[%s] Background processing error: %s", config.name, e)
             say("(error processing — I saved my progress and will pick up next time)", thread_ts=thread_ts)

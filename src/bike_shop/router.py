@@ -39,11 +39,31 @@ User message:
 """
 
 
+VALID_EXPERTS = {
+    "architect", "review-py", "debater", "explorer",
+    "dev-py", "tech-pm", "builder",
+}
+
+
 class SemanticRouter:
-    """Classifies messages and selects the right agent + model."""
+    """Classifies messages and selects the right expert + model."""
 
     def __init__(self) -> None:
         self._tracer = Tracer("semantic-router")
+        self._validated_experts = self._discover_experts()
+
+    def _discover_experts(self) -> set[str]:
+        """Check which expert agent files actually exist on disk."""
+        agents_dir = os.path.join(os.path.expanduser("~"), ".claude", "agents", "experts")
+        available: set[str] = set()
+        for name in VALID_EXPERTS:
+            if os.path.isfile(os.path.join(agents_dir, f"{name}.md")):
+                available.add(name)
+        if available:
+            logger.info("[router] Discovered experts: %s", sorted(available))
+        else:
+            logger.warning("[router] No expert files found in %s — routing will use direct mode", agents_dir)
+        return available
 
     def route(self, message: str) -> dict:
         """Classify a message. Returns {"agent": str|None, "model": str, "reason": str}."""
@@ -80,6 +100,9 @@ class SemanticRouter:
             # Normalize
             agent = decision.get("agent", "none")
             if agent == "none" or agent == "null" or not agent:
+                agent = None
+            elif agent not in self._validated_experts:
+                logger.warning("[router] Expert '%s' not found on disk — falling back to direct mode", agent)
                 agent = None
 
             model = decision.get("model", "sonnet")
