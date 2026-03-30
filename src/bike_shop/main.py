@@ -5,8 +5,6 @@ import logging
 import os
 import signal
 import sys
-import tempfile
-
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from bike_shop.config import AGENT_REGISTRY, load_config
@@ -21,7 +19,7 @@ logging.getLogger("slack_bolt").setLevel(logging.INFO)
 logging.getLogger("slack_sdk").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
-PID_DIR = os.path.join(tempfile.gettempdir(), "bike-shop")
+PID_DIR = os.path.join(os.path.expanduser("~"), ".cache", "bike-shop")
 
 
 def _pid_file(agent_name: str) -> str:

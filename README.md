@@ -22,7 +22,7 @@
 
 Bike Shop is a **multi-agent platform** where AI software engineers collaborate in Slack channels to build real software. You act as the project lead — directing, deciding, and validating — while the agents code, test, review PRs, and ship features autonomously.
 
-This project builds on top of [**claude-code**](https://github.com/nelsonfrugeri-tech/claude-code) — a foundation layer that provides reusable **agents** (spirits) and **skills** that Bike Shop agents dynamically adopt based on the task context. The agents and skills live in `~/.claude/agents/` and `~/.claude/skills/` and are provider-agnostic — they can be used by any application, not just Bike Shop.
+This project builds on top of [**claude-code**](https://github.com/nelsonfrugeri-tech/claude-code) — a foundation layer that provides reusable **experts** and **skills** that Bike Shop agents dynamically adopt based on the task context. The experts and skills live in `~/.claude/agents/experts/` and `~/.claude/skills/` and are provider-agnostic — they can be used by any application, not just Bike Shop.
 
 ---
 
@@ -58,7 +58,7 @@ This project builds on top of [**claude-code**](https://github.com/nelsonfrugeri
 
 All three are **equal software engineers** — no fixed roles, no personalities. They think backwards from delivery: _How will the project lead test this? → How do I prove it works? → What's the simplest implementation?_ — then they code.
 
-The **Semantic Router** dynamically assigns them specialized spirits (architect, reviewer, debater, etc.) based on the task at hand.
+The **Semantic Router** dynamically assigns them specialized experts (architect, reviewer, debater, etc.) based on the task at hand.
 
 ---
 
@@ -116,7 +116,7 @@ Every incoming message passes through the Semantic Router before reaching the LL
 }
 ```
 
-| Task Type | Agent (Spirit) | Model | Why |
+| Task Type | Expert | Model | Why |
 |-----------|---------------|-------|-----|
 | Architecture, system design | `architect` | opus | Deep thinking, trade-offs |
 | Code review, PR review | `review-py` | sonnet | Standard analysis |
@@ -127,25 +127,28 @@ Every incoming message passes through the Semantic Router before reaching the LL
 | Infrastructure setup | `builder` | sonnet | Standard execution |
 | Simple question, confirmation | (none) | haiku | Quick and cheap |
 
-### Spirits & Bodies — The Architecture
+### Experts & Agents — The Architecture
 
-This project follows a **spirits & bodies** architecture inspired by the [claude-code](https://github.com/nelsonfrugeri-tech/claude-code) foundation:
+This project follows an **experts & agents** architecture inspired by the [claude-code](https://github.com/nelsonfrugeri-tech/claude-code) foundation:
 
-- **Spirits** (`~/.claude/agents/`) — Agnostic, reusable capabilities. They don't know about Slack, Bike Shop, or any specific project. They're pure expertise: architecture, code review, SRE, coding, etc.
+- **Experts** (`~/.claude/agents/experts/`) — Agnostic, reusable capabilities. They don't know about Slack, Bike Shop, or any specific project. They're pure expertise: architecture, code review, SRE, coding, etc.
 
-- **Bodies** (Mr. Robot, Elliot, Tyrell) — The Slack bots that receive messages and invoke spirits based on context. The Semantic Router decides which spirit a body assumes for each task.
+- **Agents** (Mr. Robot, Elliot, Tyrell) — The Slack bots that receive messages and invoke experts based on context. The Semantic Router decides which expert an agent assumes for each task.
 
 ```
-~/.claude/agents/          ← Spirits (from claude-code project)
+~/.claude/agents/experts/  ← Experts (from claude-code project)
   architect.md             ← Knows architecture
   review-py.md             ← Knows code review
   debater.md               ← Knows how to debate trade-offs
-  sentinel.md              ← Knows SRE/observability
   dev-py.md                ← Knows Python implementation
   tech-pm.md               ← Knows product management
   explorer.md              ← Knows codebase exploration
   builder.md               ← Knows infrastructure setup
   memory-agent.md          ← Knows fact extraction
+
+~/.claude/agents/founds/   ← Foundational agents (ecosystem-only)
+  oracle.md                ← Ecosystem manager
+  sentinel.md              ← SRE/observability
 
 ~/.claude/skills/          ← Skills (from claude-code project)
   arch-py.md               ← Python architecture patterns
@@ -154,10 +157,10 @@ This project follows a **spirits & bodies** architecture inspired by the [claude
   ai-engineer.md           ← LLM/RAG/Agent patterns
   product-manager.md       ← Product management practices
 
-bike-shop/                 ← Bodies (this project)
-  Mr. Robot                ← Slack bot that uses spirits
-  Elliot Alderson          ← Slack bot that uses spirits
-  Tyrell Wellick           ← Slack bot that uses spirits
+bike-shop/                 ← Agents (this project)
+  Mr. Robot                ← Slack bot that uses experts
+  Elliot Alderson          ← Slack bot that uses experts
+  Tyrell Wellick           ← Slack bot that uses experts
 ```
 
 ### Slack Integration — Socket Mode
@@ -238,7 +241,7 @@ All agents share the **same memory** powered by [Mem0](https://github.com/mem0ai
 | 🔄 **Model Switching** | Automatic (router), manual ("think deeply"), self-escalation (`[DEEP_THINK]`) |
 | 🤝 **Smart Collaboration** | Agents tag teammates for PR reviews and blockers — anti-loop (max 5/thread) |
 | 🔐 **GitHub Identity** | Each agent has its own GitHub App with JWT auth |
-| 👻 **Spirits Architecture** | Agents dynamically assume specialized spirits from [claude-code](https://github.com/nelsonfrugeri-tech/claude-code) |
+| **Experts Architecture** | Agents dynamically assume specialized experts from [claude-code](https://github.com/nelsonfrugeri-tech/claude-code) |
 | 👁️ **Sentinel** | SRE agent for querying Langfuse: tokens, costs, errors, health |
 
 ---
@@ -264,7 +267,7 @@ All agents share the **same memory** powered by [Mem0](https://github.com/mem0ai
          └───────────────┼───────────────┘
                          │
               ┌──────────▼──────────┐
-              │   Claude Code CLI   │  ← --agent {spirit}
+              │   Claude Code CLI   │  ← --agent {expert}
               │   --model {model}   │     --model {opus|sonnet|haiku}
               └──────────┬──────────┘
                          │
@@ -313,14 +316,13 @@ bike-shop/
 │   ├── github_auth.py           # GitHub App JWT → installation token
 │   ├── session.py               # Session tracking per Slack thread (24h TTL)
 │   ├── model_switch.py          # Deep think triggers, [DEEP_THINK] escalation
-│   ├── handlers.py              # Backward-compatible entry point
+│   ├── handlers.py              # Entry point — wires config to SlackAgentHandler
 │   ├── providers/
 │   │   ├── __init__.py          # LLMProvider ABC (provider-agnostic)
 │   │   └── claude.py            # ClaudeProvider (Claude CLI + full stream-json parsing)
 │   └── slack/
 │       ├── context.py           # Thread context, mentions, user resolution
 │       └── handler.py           # SlackAgentHandler (orchestrates the full flow)
-├── bin/claude/                  # Shell scripts for running agents via CLI
 ├── assets/team/                 # Agent avatars
 ├── docker-compose.yml           # Langfuse + Postgres + Qdrant + Ollama
 ├── mcp.json                     # MCP servers (Notion, draw.io, Excalidraw, memory-keeper)
@@ -426,14 +428,14 @@ For agents that need to create PRs, issues, and comments:
 
 ### Step 6: Install Foundation (claude-code)
 
-The spirits and skills come from the [claude-code](https://github.com/nelsonfrugeri-tech/claude-code) project:
+The experts and skills come from the [claude-code](https://github.com/nelsonfrugeri-tech/claude-code) project:
 
 ```bash
 # Clone the foundation layer (if not already set up)
 git clone https://github.com/nelsonfrugeri-tech/claude-code.git ~/.claude
 ```
 
-This provides `~/.claude/agents/` (spirits) and `~/.claude/skills/` that the Semantic Router uses.
+This provides `~/.claude/agents/experts/` (experts) and `~/.claude/skills/` that the Semantic Router uses.
 
 ### Step 7: Run
 

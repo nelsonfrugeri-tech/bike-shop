@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import time
 
-SESSIONS_DIR = os.path.join(tempfile.gettempdir(), "bike-shop")
+SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".cache", "bike-shop", "sessions")
 SESSION_TTL = 86400  # 24h
 
 
