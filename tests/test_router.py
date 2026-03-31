@@ -152,3 +152,60 @@ class TestDiscoverExperts:
         router = SemanticRouter(experts_dir=str(tmp_path))
 
         assert router._validated_experts == {"good"}
+
+    @patch("bike_shop.router.Tracer")
+    def test_strips_quotes_from_name(
+        self, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        md = tmp_path / "quoted.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            name: "dev-py"
+            description: A quoted expert. Does things.
+            model: opus
+            ---
+        """))
+
+        router = SemanticRouter(experts_dir=str(tmp_path))
+
+        assert "dev-py" in router._validated_experts
+
+    @patch("bike_shop.router.Tracer")
+    def test_rejects_invalid_name_format(
+        self, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        md = tmp_path / "bad-name.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            name: dev py
+            description: Name with space. Should be rejected.
+            model: opus
+            ---
+        """))
+
+        router = SemanticRouter(experts_dir=str(tmp_path))
+
+        assert len(router._validated_experts) == 0
+
+    @patch("bike_shop.router.Tracer")
+    def test_skips_symlink_outside_dir(
+        self, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        experts = tmp_path / "experts"
+        experts.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "evil.md"
+        target.write_text(textwrap.dedent("""\
+            ---
+            name: evil
+            description: Should not be loaded. Evil expert.
+            model: opus
+            ---
+        """))
+        symlink = experts / "evil.md"
+        symlink.symlink_to(target)
+
+        router = SemanticRouter(experts_dir=str(experts))
+
+        assert "evil" not in router._validated_experts

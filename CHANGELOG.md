@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 - Standardized image format to .jpg (was mixed .png/.jpeg)
 - README references updated to match new filenames
 - **Semantic Router: dynamic expert discovery** — experts are no longer hardcoded in `router.py`. On boot, the router scans `~/.claude/agents/experts/*.md`, parses frontmatter, and builds the routing prompt dynamically. Adding a new expert is zero-code: drop the `.md` file and restart
+- Router hardening: symlink traversal guard, name format validation (`^[a-z][a-z0-9-]*$`), quoted frontmatter values stripped
+- 3 new tests for router: quoted names, invalid name format, symlink outside dir (13 total)
 
 ## [v0.1.0] - 2026-03-28
 

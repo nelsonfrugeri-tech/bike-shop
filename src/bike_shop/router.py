@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 from bike_shop.config import MODEL_MAP
 from bike_shop.observability import Tracer
@@ -57,7 +58,7 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
     name_match = re.search(r"^name:\s*(.+)$", fm, re.MULTILINE)
     if not name_match:
         return None
-    name = name_match.group(1).strip()
+    name = name_match.group(1).strip().strip('"').strip("'")
 
     # Extract description (may be multi-line folded with >)
     desc_match = re.search(
@@ -71,10 +72,16 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
         desc_match = re.search(r"^description:\s*(.+)$", fm, re.MULTILINE)
         if not desc_match:
             return None
-        full_desc = desc_match.group(1).strip()
+        full_desc = desc_match.group(1).strip().strip('"').strip("'")
 
     # First sentence (up to first period)
     first_sentence = full_desc.split(".")[0].strip()
+
+    # Validate name format: lowercase letters, digits, hyphens
+    if not re.match(r"^[a-z][a-z0-9-]*$", name):
+        logger.warning("[router] Invalid expert name format: '%s' — skipping", name)
+        return None
+
     return name, first_sentence
 
 
@@ -101,7 +108,11 @@ class SemanticRouter:
         pattern = os.path.join(agents_dir, "*.md")
         experts: dict[str, str] = {}
 
+        resolved_dir = Path(agents_dir).resolve()
         for filepath in sorted(glob.glob(pattern)):
+            if not Path(filepath).resolve().is_relative_to(resolved_dir):
+                logger.warning("[router] Skipping symlink outside experts dir: %s", filepath)
+                continue
             parsed = _parse_frontmatter(filepath)
             if parsed:
                 name, short_desc = parsed
