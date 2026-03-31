@@ -74,8 +74,10 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
             return None
         full_desc = desc_match.group(1).strip().strip('"').strip("'")
 
-    # First sentence (up to first period)
-    first_sentence = full_desc.split(".")[0].strip()
+    # First sentence: split on period followed by space or end-of-string
+    # (avoids truncating on abbreviations like "e.g.", "v2.0", "Dr.")
+    sentence_match = re.match(r"(.+?\.(?:\s|$))", full_desc)
+    first_sentence = sentence_match.group(1).strip().rstrip(".") if sentence_match else full_desc[:120]
 
     # Validate name format: lowercase letters, digits, hyphens
     if not re.match(r"^[a-z][a-z0-9-]*$", name):
@@ -88,8 +90,9 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
 class SemanticRouter:
     """Classifies messages and selects the right expert + model."""
 
-    EXPERTS_DIR = os.path.join(
-        os.path.expanduser("~"), ".claude", "agents", "experts",
+    EXPERTS_DIR = os.getenv(
+        "EXPERTS_DIR",
+        os.path.join(os.path.expanduser("~"), ".claude", "agents", "experts"),
     )
 
     def __init__(self, experts_dir: str | None = None) -> None:

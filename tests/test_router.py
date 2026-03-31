@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import textwrap
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -209,3 +211,74 @@ class TestDiscoverExperts:
         router = SemanticRouter(experts_dir=str(experts))
 
         assert "evil" not in router._validated_experts
+
+
+# ---------------------------------------------------------------------------
+# SemanticRouter.route() with subprocess mock
+# ---------------------------------------------------------------------------
+
+
+class TestRoute:
+    """Tests for route() with subprocess mocked."""
+
+    @patch("bike_shop.router.Tracer")
+    def _make_router(self, _mock_tracer: object, tmp_path: Path) -> SemanticRouter:
+        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
+        _create_expert(tmp_path, "architect", "System design expert. Makes diagrams.")
+        return SemanticRouter(experts_dir=str(tmp_path))
+
+    @patch("bike_shop.router.Tracer")
+    @patch("bike_shop.router.subprocess.run")
+    def test_route_delegates_to_expert(
+        self, mock_run: MagicMock, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
+        router = SemanticRouter(experts_dir=str(tmp_path))
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps({"agent": "dev-py", "model": "opus", "reason": "complex coding"}),
+            stderr="",
+        )
+
+        result = router.route("implement the auth module")
+
+        assert result["agent"] == "dev-py"
+        assert result["model_name"] == "opus"
+        # Verify the dynamic prompt was passed to subprocess
+        call_args = mock_run.call_args[0][0]
+        assert "dev-py" in call_args[2]  # prompt is 3rd arg after "claude", "-p"
+
+    @patch("bike_shop.router.Tracer")
+    @patch("bike_shop.router.subprocess.run")
+    def test_route_unknown_expert_falls_back(
+        self, mock_run: MagicMock, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
+        router = SemanticRouter(experts_dir=str(tmp_path))
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=json.dumps({"agent": "nonexistent", "model": "sonnet", "reason": "test"}),
+            stderr="",
+        )
+
+        result = router.route("do something")
+
+        assert result["agent"] is None  # fell back because expert not on disk
+
+    @patch("bike_shop.router.Tracer")
+    @patch("bike_shop.router.subprocess.run")
+    def test_route_timeout_falls_back_to_sonnet(
+        self, mock_run: MagicMock, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
+        router = SemanticRouter(experts_dir=str(tmp_path))
+
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=30)
+
+        result = router.route("anything")
+
+        assert result["agent"] is None
+        assert result["model_name"] == "sonnet"
+        assert result["reason"] == "router_fallback"
