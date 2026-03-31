@@ -32,21 +32,21 @@ This project builds on top of [**claude-code**](https://github.com/nelsonfrugeri
 <table>
 <tr>
 <td align="center" width="33%">
-<img src="assets/team/mr_robot.png" width="150" height="150" style="border-radius: 50%;" alt="Mr. Robot"/>
+<img src="assets/team/mr_robot.jpg" width="150" height="150" style="border-radius: 50%;" alt="Mr. Robot"/>
 <br/>
 <strong>Mr. Robot</strong>
 <br/>
 <em>Software Engineer</em>
 </td>
 <td align="center" width="33%">
-<img src="assets/team/elliot.jpeg" width="150" height="150" style="border-radius: 50%;" alt="Elliot Alderson"/>
+<img src="assets/team/elliot.jpg" width="150" height="150" style="border-radius: 50%;" alt="Elliot Alderson"/>
 <br/>
 <strong>Elliot Alderson</strong>
 <br/>
 <em>Software Engineer</em>
 </td>
 <td align="center" width="33%">
-<img src="assets/team/tyrell.png" width="150" height="150" style="border-radius: 50%;" alt="Tyrell Wellick"/>
+<img src="assets/team/tyrell.jpg" width="150" height="150" style="border-radius: 50%;" alt="Tyrell Wellick"/>
 <br/>
 <strong>Tyrell Wellick</strong>
 <br/>

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- Team photos updated — new high-quality images with consistent red background theme
+- Standardized image format to .jpg (was mixed .png/.jpeg)
+- README references updated to match new filenames
+
 ## [v0.1.0] - 2026-03-28
 
 ### First release — Multi-agent team platform
