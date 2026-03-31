@@ -116,6 +116,8 @@ Every incoming message passes through the Semantic Router before reaching the LL
 }
 ```
 
+The router **dynamically discovers experts** at boot by scanning `~/.claude/agents/experts/*.md` and parsing each file's frontmatter (`name` + `description`). Adding a new expert is zero-code: drop a `.md` file in the experts directory and restart. Example routing decisions:
+
 | Task Type | Expert | Model | Why |
 |-----------|---------------|-------|-----|
 | Architecture, system design | `architect` | opus | Deep thinking, trade-offs |
@@ -310,7 +312,7 @@ bike-shop/
 │   ├── main.py                  # CLI: bike-shop agent:all, --status, --stop
 │   ├── config.py                # AgentConfig, MODEL_MAP, env loading
 │   ├── agents.py                # Agent prompts (common rules, no personality)
-│   ├── router.py                # Semantic Router (haiku → agent + model)
+│   ├── router.py                # Semantic Router (haiku → agent + model, dynamic expert discovery)
 │   ├── memory_agent.py          # MemoryAgent (Mem0: observe + recall)
 │   ├── observability.py         # Langfuse tracer (traces, spans, errors)
 │   ├── github_auth.py           # GitHub App JWT → installation token
