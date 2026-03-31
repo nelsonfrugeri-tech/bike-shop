@@ -81,6 +81,49 @@ class TestParseFrontmatter:
     def test_file_not_found(self) -> None:
         assert _parse_frontmatter("/nonexistent/path.md") is None
 
+    def test_sentence_split_preserves_version_numbers(self, tmp_path: Path) -> None:
+        md = tmp_path / "expert.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            name: dev-ts
+            description: TypeScript v5.7 expert for React v19.0 apps. Writes tests first.
+            model: opus
+            ---
+        """))
+        result = _parse_frontmatter(str(md))
+        assert result is not None
+        _, desc = result
+        assert desc == "TypeScript v5.7 expert for React v19.0 apps"
+
+    def test_sentence_split_on_period_space(self, tmp_path: Path) -> None:
+        """Splits on '. ' boundary — first sentence only."""
+        md = tmp_path / "expert.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            name: doc-writer
+            description: Writes docs and guides. Also changelogs and READMEs.
+            model: sonnet
+            ---
+        """))
+        result = _parse_frontmatter(str(md))
+        assert result is not None
+        _, desc = result
+        assert desc == "Writes docs and guides"
+
+    def test_sentence_split_single_sentence_no_trailing_period(self, tmp_path: Path) -> None:
+        md = tmp_path / "expert.md"
+        md.write_text(textwrap.dedent("""\
+            ---
+            name: minimal
+            description: Just one sentence without period
+            model: haiku
+            ---
+        """))
+        result = _parse_frontmatter(str(md))
+        assert result is not None
+        _, desc = result
+        assert desc == "Just one sentence without period"
+
 
 # ---------------------------------------------------------------------------
 # SemanticRouter._discover_experts / _build_prompt

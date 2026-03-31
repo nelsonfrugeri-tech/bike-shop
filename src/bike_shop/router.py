@@ -74,10 +74,10 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
             return None
         full_desc = desc_match.group(1).strip().strip('"').strip("'")
 
-    # First sentence: split on period followed by space or end-of-string
-    # (avoids truncating on abbreviations like "e.g.", "v2.0", "Dr.")
-    sentence_match = re.match(r"(.+?\.(?:\s|$))", full_desc)
-    first_sentence = sentence_match.group(1).strip().rstrip(".") if sentence_match else full_desc[:120]
+    # First sentence: split on ". " (period + space) to avoid truncating on
+    # abbreviations like "e.g.", version numbers like "v2.0", or "Dr."
+    parts = re.split(r"\.\s", full_desc, maxsplit=1)
+    first_sentence = parts[0].strip().rstrip(".")
 
     # Validate name format: lowercase letters, digits, hyphens
     if not re.match(r"^[a-z][a-z0-9-]*$", name):
