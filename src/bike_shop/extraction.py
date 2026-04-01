@@ -59,15 +59,18 @@ def extract_memories(
     )
 
     try:
+        # Pass prompt via stdin (-p -) to avoid shell injection via CLI args.
+        # --dangerously-skip-permissions is required because Claude CLI
+        # demands it for non-interactive subprocess calls (no TTY).
         result = subprocess.run(
             [
-                "claude", "-p", prompt,
+                "claude", "-p", "-",
                 "--model", EXTRACTION_MODEL,
                 "--dangerously-skip-permissions",
                 "--output-format", "text",
                 "--max-turns", "1",
             ],
-            stdin=subprocess.DEVNULL,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=15,

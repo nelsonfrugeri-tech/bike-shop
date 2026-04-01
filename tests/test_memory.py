@@ -126,7 +126,7 @@ class TestShortTermMemory:
 class TestMemoryAgentScopes:
     """Tests that MemoryAgent maps scopes to correct Mem0 user_ids."""
 
-    @patch("bike_shop.memory_agent._get_mem0")
+    @patch("bike_shop.memory_agent.get_mem0")
     def test_scope_user_ids(self, mock_mem0: MagicMock) -> None:
         mock_mem0.return_value = MagicMock()
 
@@ -137,7 +137,7 @@ class TestMemoryAgentScopes:
         assert ma._uid_project == "team:bike-shop"
         assert ma._uid_agent == "mr-robot:bike-shop"
 
-    @patch("bike_shop.memory_agent._get_mem0")
+    @patch("bike_shop.memory_agent.get_mem0")
     def test_scope_to_user_id_mapping(self, mock_mem0: MagicMock) -> None:
         mock_mem0.return_value = MagicMock()
 
@@ -157,7 +157,7 @@ class TestMemoryAgentScopes:
 class TestMemoryAgentRecall:
     """Tests that recall queries all scopes and assembles output."""
 
-    @patch("bike_shop.memory_agent._get_mem0")
+    @patch("bike_shop.memory_agent.get_mem0")
     @patch("bike_shop.short_term.get_redis")
     def test_recall_assembles_all_scopes(
         self, mock_redis: MagicMock, mock_get_mem0: MagicMock,
@@ -188,7 +188,7 @@ class TestMemoryAgentRecall:
         # Mem0 should be called 3 times (agent, project, team)
         assert mock_mem0.search.call_count == 3
 
-    @patch("bike_shop.memory_agent._get_mem0")
+    @patch("bike_shop.memory_agent.get_mem0")
     @patch("bike_shop.short_term.get_redis")
     def test_recall_returns_empty_when_nothing_found(
         self, mock_redis: MagicMock, mock_get_mem0: MagicMock,
@@ -206,7 +206,7 @@ class TestMemoryAgentRecall:
         result = ma.recall("anything")
         assert result == ""
 
-    @patch("bike_shop.memory_agent._get_mem0")
+    @patch("bike_shop.memory_agent.get_mem0")
     @patch("bike_shop.short_term.get_redis")
     def test_recall_graceful_when_mem0_down(
         self, mock_redis: MagicMock, mock_get_mem0: MagicMock,

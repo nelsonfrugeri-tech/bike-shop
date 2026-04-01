@@ -19,6 +19,14 @@ TTL_SECONDS = 86400  # 24 hours
 class ShortTermMemory:
     """Redis-backed short-term conversation memory.
 
+    Key format invariant:
+        bike-shop:{agent}:{project}:{channel}:{thread_ts}
+        - agent: lowercase, hyphenated (e.g., "mr-robot")
+        - project: lowercase, hyphenated (e.g., "market-analysis")
+        - channel: Slack channel ID (alphanumeric, e.g., "C0APD9JNE10")
+        - thread_ts: Slack timestamp (digits and dot, e.g., "1774992784.411319")
+        None of these fields contain ":" so split(":") is safe.
+
     Key patterns:
         Thread buffer: bike-shop:{agent}:{project}:{channel}:{thread_ts}
         Recent index:  bike-shop:{agent}:{project}:recent

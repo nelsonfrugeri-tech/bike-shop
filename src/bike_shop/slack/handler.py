@@ -166,17 +166,12 @@ class SlackAgentHandler:
 
     def _process_and_reply(self, say, client: WebClient,
                            context: str, question: str, thread_ts: str,
-                           channel: str = "") -> None:
+                           channel: str = "", user_name: str = "") -> None:
         """Process LLM call in background thread and reply when done."""
         config = self._config
         try:
             # Push user message to Redis short-term BEFORE LLM call
-            # question format: "user_name: message_text"
-            if ": " in question:
-                user_part, msg_part = question.split(": ", 1)
-            else:
-                user_part, msg_part = "", question
-            self._memory_agent.push_user_message(user_part, msg_part, channel, thread_ts)
+            self._memory_agent.push_user_message(user_name, question, channel, thread_ts)
 
             # Semantic Router — decide agent + model
             route = self._router.route(question)
@@ -230,6 +225,7 @@ class SlackAgentHandler:
                 config.name, question, reply,
                 channel=channel, thread_ts=thread_ts,
                 route_decision=route_decision,
+                user_name=user_name,
             )
 
             # Suppress empty/no-action responses — don't waste Slack messages
@@ -289,7 +285,8 @@ class SlackAgentHandler:
 
         thread = threading.Thread(
             target=self._process_and_reply,
-            args=(say, client, context, f"{user_name}: {clean_text}", thread_ts, channel),
+            args=(say, client, context, clean_text, thread_ts, channel),
+            kwargs={"user_name": user_name},
             daemon=True,
         )
         thread.start()
@@ -311,7 +308,8 @@ class SlackAgentHandler:
 
         thread = threading.Thread(
             target=self._process_and_reply,
-            args=(say, client, context, f"{user_name}: {text}", thread_ts, channel),
+            args=(say, client, context, text, thread_ts, channel),
+            kwargs={"user_name": user_name},
             daemon=True,
         )
         thread.start()

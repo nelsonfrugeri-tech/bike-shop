@@ -12,7 +12,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-from bike_shop.memory_agent import _get_mem0
+from bike_shop.mem0_client import get_mem0
 from bike_shop.short_term import ShortTermMemory
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class Summarizer:
             logger.info("[summarizer] No expiring keys found")
             return 0
 
-        mem0 = _get_mem0()
+        mem0 = get_mem0()
         count = 0
 
         for key, messages in expiring:
@@ -114,15 +114,18 @@ class Summarizer:
         prompt = _SUMMARIZE_PROMPT.format(conversation=conversation_text[:4000])
 
         try:
+            # Pass prompt via stdin (-p -) to avoid shell injection via CLI args.
+            # --dangerously-skip-permissions is required because Claude CLI
+            # demands it for non-interactive subprocess calls (no TTY).
             result = subprocess.run(
                 [
-                    "claude", "-p", prompt,
+                    "claude", "-p", "-",
                     "--model", SUMMARIZE_MODEL,
                     "--dangerously-skip-permissions",
                     "--output-format", "text",
                     "--max-turns", "1",
                 ],
-                stdin=subprocess.DEVNULL,
+                input=prompt,
                 capture_output=True,
                 text=True,
                 timeout=20,

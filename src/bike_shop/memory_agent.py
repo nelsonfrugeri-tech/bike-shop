@@ -8,69 +8,14 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from bike_shop.extraction import extract_memories
+from bike_shop.mem0_client import get_mem0
 from bike_shop.short_term import ShortTermMemory
 
 logger = logging.getLogger(__name__)
-
-# Lazy-loaded Mem0 client
-_mem0 = None
-
-
-def _get_mem0():
-    """Get or create a Mem0 client. Returns None if not configured."""
-    global _mem0
-    if _mem0 is not None:
-        return _mem0
-
-    qdrant_host = os.environ.get("QDRANT_HOST", "localhost")
-    qdrant_port = int(os.environ.get("QDRANT_PORT", "6333"))
-    ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
-    try:
-        from mem0 import Memory
-
-        config = {
-            "vector_store": {
-                "provider": "qdrant",
-                "config": {
-                    "host": qdrant_host,
-                    "port": qdrant_port,
-                    "collection_name": "bike-shop-memory",
-                    "embedding_model_dims": 768,
-                },
-            },
-            "embedder": {
-                "provider": "ollama",
-                "config": {
-                    "model": "nomic-embed-text",
-                    "ollama_base_url": ollama_url,
-                },
-            },
-        }
-
-        # Use Anthropic for memory extraction if key available
-        if anthropic_key:
-            config["llm"] = {
-                "provider": "anthropic",
-                "config": {
-                    "model": "claude-haiku-4-5-20251001",
-                    "api_key": anthropic_key,
-                },
-            }
-
-        _mem0 = Memory.from_config(config)
-        logger.info("Mem0 connected (qdrant=%s:%d, ollama=%s)", qdrant_host, qdrant_port, ollama_url)
-        return _mem0
-    except ImportError:
-        logger.warning("mem0ai not installed — memory agent disabled")
-        return None
-    except Exception as e:
-        logger.error("Failed to connect Mem0: %s", e)
-        return None
 
 
 class MemoryAgent:
@@ -93,7 +38,7 @@ class MemoryAgent:
         self._uid_agent = f"{agent_key}:{project_id}"
 
         self._mem0_enabled = False
-        mem0 = _get_mem0()
+        mem0 = get_mem0()
         if mem0:
             self._mem0_enabled = True
             logger.info(
@@ -149,27 +94,33 @@ class MemoryAgent:
                 lines.append(f"  - {author}: {content[:150]}")
             sections.append("SHORT-TERM — Recent activity:\n" + "\n".join(lines))
 
-        # --- Mem0 long-term ---
+        # --- Mem0 long-term (parallel lookups) ---
         if self._mem0_enabled:
-            mem0 = _get_mem0()
+            mem0 = get_mem0()
             if mem0:
-                for label, uid, limit in [
+                scopes = [
                     ("LONG-TERM — Agent memory", self._uid_agent, 5),
                     ("LONG-TERM — Project memory", self._uid_project, 5),
                     ("LONG-TERM — Team memory", self._uid_team, 3),
-                ]:
-                    try:
-                        results = mem0.search(query, user_id=uid, limit=limit)
-                        memories = []
-                        if results and results.get("results"):
-                            for r in results["results"]:
-                                text = r.get("memory", "")
-                                if text:
-                                    memories.append(f"  - {text}")
-                        if memories:
-                            sections.append(f"{label}:\n" + "\n".join(memories))
-                    except Exception as e:
-                        logger.warning("[memory-agent] Failed to recall %s: %s", label, e)
+                ]
+                with ThreadPoolExecutor(max_workers=3) as pool:
+                    futures = {}
+                    for label, uid, lim in scopes:
+                        futures[pool.submit(mem0.search, query, user_id=uid, limit=lim)] = label
+                    for future in as_completed(futures):
+                        label = futures[future]
+                        try:
+                            results = future.result(timeout=5)
+                            memories = []
+                            if results and results.get("results"):
+                                for r in results["results"]:
+                                    text = r.get("memory", "")
+                                    if text:
+                                        memories.append(f"  - {text}")
+                            if memories:
+                                sections.append(f"{label}:\n" + "\n".join(memories))
+                        except Exception as e:
+                            logger.warning("[memory-agent] Failed to recall %s: %s", label, e)
 
         if not sections:
             return ""
@@ -207,16 +158,18 @@ class MemoryAgent:
         channel: str = "",
         thread_ts: str = "",
         route_decision: dict[str, Any] | None = None,
+        user_name: str = "",
     ) -> None:
         """Observe a message exchange: push to Redis + selective extraction to Mem0.
 
         Args:
             agent_name: Display name of the agent.
-            user_message: The user's message.
+            user_message: The user's message (without user_name prefix).
             agent_response: The agent's response.
             channel: Slack channel ID.
             thread_ts: Slack thread timestamp.
             route_decision: Router decision dict (agent, model, model_name, reason).
+            user_name: Display name of the user who sent the message.
         """
         # 1. Push agent response to Redis short-term
         route = route_decision or {}
@@ -243,7 +196,7 @@ class MemoryAgent:
         if not self._mem0_enabled:
             return
 
-        mem0 = _get_mem0()
+        mem0 = get_mem0()
         if not mem0:
             return
 
