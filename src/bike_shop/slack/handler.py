@@ -218,19 +218,8 @@ class SlackAgentHandler:
 
             logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
 
-            # Memory Agent — observe the exchange for selective extraction
-            route_decision = {
-                "agent": agent_override,
-                "model": model_override or config.model_id,
-                "model_name": router_model_name,
-                "reason": router_reason,
-            }
-            self._memory_agent.observe(
-                config.name, question, reply,
-                channel=channel, thread_ts=thread_ts,
-                route_decision=route_decision,
-                user_name=user_name,
-            )
+            # Memory Agent — observe the exchange for selective extraction (fire-and-forget)
+            self._memory_agent.observe(config.name, question, reply)
 
             # Strip markdown bold/italic wrapping mentions — Slack won't generate
             # app_mention events if <@USER_ID> is inside **bold** or *italic*

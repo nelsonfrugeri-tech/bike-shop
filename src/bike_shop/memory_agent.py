@@ -132,7 +132,7 @@ class MemoryAgent:
 
         sections: list[str] = []
 
-        with ThreadPoolExecutor(max_workers=len(memory_requests) * 3) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(memory_requests) * 3, 12)) as pool:
             futures: dict[Any, str] = {}
 
             for req in memory_requests:
@@ -177,7 +177,9 @@ class MemoryAgent:
         limit: int = 5,
     ) -> list[str]:
         """Search Mem0 and filter results by memory type metadata."""
-        results = mem0.search(query, user_id=user_id, limit=limit)
+        # Over-fetch when filtering by type to compensate for client-side filtering
+        fetch_limit = limit * 3 if types else limit
+        results = mem0.search(query, user_id=user_id, limit=fetch_limit)
         memories = []
 
         if not results:
@@ -206,10 +208,6 @@ class MemoryAgent:
         agent_name: str,
         user_message: str,
         agent_response: str,
-        channel: str = "",
-        thread_ts: str = "",
-        route_decision: dict[str, Any] | None = None,
-        user_name: str = "",
     ) -> None:
         """Fire-and-forget: extract memories in a background thread.
 
@@ -234,11 +232,11 @@ class MemoryAgent:
         agent_response: str,
     ) -> None:
         """Synchronous extraction + storage. Runs in background thread."""
-        mem0 = get_mem0()
-        if not mem0:
-            return
-
         try:
+            mem0 = get_mem0()
+            if not mem0:
+                return
+
             memories = extract_memories(
                 agent_name, user_message, agent_response, self._project_id,
             )
@@ -261,4 +259,4 @@ class MemoryAgent:
                     len(memories), agent_name,
                 )
         except Exception as e:
-            logger.warning("[memory-agent] Failed to store observations: %s", e)
+            logger.warning("[memory-agent] Background extraction failed for %s: %s", agent_name, e)
