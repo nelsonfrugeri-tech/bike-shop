@@ -136,15 +136,19 @@ class SlackAgentHandler:
     def _call_llm(self, context: str, question: str, thread_ts: str,
                   model_override: str | None = None, agent_override: str | None = None,
                   router_meta: dict | None = None,
-                  channel: str = "") -> str:
+                  channel: str = "",
+                  memory_requests: list | None = None) -> str:
         """Call the LLM provider and handle session tracking."""
         config = self._config
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
 
-        # Mem0 only on new threads (no session_id) — --resume handles in-thread context
+        # Memory recall: full recall on new threads + router-driven filtered recall
         shared_memory = self._memory_agent.recall(question, has_session=session_id is not None)
+        if memory_requests:
+            filtered = self._memory_agent.recall_filtered(memory_requests)
+            shared_memory = (shared_memory + filtered) if shared_memory else filtered
         prompt = _build_prompt(config, context, question, github_token, shared_memory)
 
         response, new_session_id = self._provider.call(
@@ -171,16 +175,17 @@ class SlackAgentHandler:
         """Process LLM call in background thread and reply when done."""
         config = self._config
         try:
-            # Semantic Router — decide agent + model (with Slack thread context)
+            # Semantic Router — decide agent + model + memory (with Slack thread context)
             route = self._router.route(question, thread_context=context)
             agent_override = route.get("agent")
             model_override = route.get("model")
             router_model_name = route.get("model_name", "sonnet")
             router_reason = route.get("reason", "")
+            memory_requests = route.get("memory", [])
 
-            logger.info("[%s] Router: agent=%s model=%s reason=%s",
+            logger.info("[%s] Router: agent=%s model=%s memory_lookups=%d reason=%s",
                         config.name, agent_override or "direct",
-                        router_model_name, router_reason)
+                        router_model_name, len(memory_requests), router_reason)
 
             # Manual trigger overrides router's model choice
             force_opus = self._switcher.is_manual_trigger(question)
@@ -195,7 +200,8 @@ class SlackAgentHandler:
                                    router_meta={"model_name": router_model_name,
                                                 "reason": router_reason,
                                                 "agent": agent_override},
-                                   channel=channel)
+                                   channel=channel,
+                                   memory_requests=memory_requests)
 
             if self._switcher.has_marker(reply):
                 if not self._switcher.should_escalate(thread_ts):

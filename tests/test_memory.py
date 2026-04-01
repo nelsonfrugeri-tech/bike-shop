@@ -1,4 +1,4 @@
-"""Tests for memory: MemoryAgent scopes, recall, extraction."""
+"""Tests for memory: schema, MemoryAgent scopes, recall, filtered recall, extraction."""
 
 from __future__ import annotations
 
@@ -6,6 +6,38 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Memory Schema — single source of truth
+# ---------------------------------------------------------------------------
+
+
+class TestMemorySchema:
+    """Tests that memory schema provides consistent domain definitions."""
+
+    def test_valid_scopes(self) -> None:
+        from bike_shop.memory_schema import valid_scopes
+        scopes = valid_scopes()
+        assert "team" in scopes
+        assert "project" in scopes
+        assert "agent" in scopes
+
+    def test_valid_types(self) -> None:
+        from bike_shop.memory_schema import valid_types
+        types = valid_types()
+        assert "decision" in types
+        assert "fact" in types
+        assert "preference" in types
+        assert "procedure" in types
+        assert "outcome" in types
+
+    def test_descriptions_are_strings(self) -> None:
+        from bike_shop.memory_schema import scopes_description, types_description
+        assert isinstance(scopes_description(), str)
+        assert isinstance(types_description(), str)
+        assert "team" in scopes_description()
+        assert "decision" in types_description()
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +72,7 @@ class TestMemoryAgentScopes:
 
 
 # ---------------------------------------------------------------------------
-# MemoryAgent — recall (Mem0 only, no Redis)
+# MemoryAgent — recall (full, new threads only)
 # ---------------------------------------------------------------------------
 
 
@@ -76,7 +108,6 @@ class TestMemoryAgentRecall:
         assert "PROJECT MEMORY" in result
         assert "LONG-TERM" in result
         assert "some remembered fact" in result
-        # Mem0 should be called 3 times (agent, project, team)
         assert mock_mem0.search.call_count == 3
 
     @patch("bike_shop.memory_agent.get_mem0")
@@ -99,6 +130,96 @@ class TestMemoryAgentRecall:
         ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
 
         result = ma.recall("anything", has_session=False)
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# MemoryAgent — recall_filtered (router-driven)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryAgentRecallFiltered:
+    """Tests that recall_filtered queries Mem0 with scope + type filters."""
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_returns_matching_memories(self, mock_get_mem0: MagicMock) -> None:
+        mock_mem0 = MagicMock()
+        mock_get_mem0.return_value = mock_mem0
+        mock_mem0.search.return_value = {
+            "results": [
+                {"memory": "deploy via make deploy", "metadata": {"type": "procedure", "scope": "project"}},
+                {"memory": "use TDD always", "metadata": {"type": "preference", "scope": "team"}},
+            ],
+        }
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([
+            {"query": "deploy process", "scopes": ["project"], "types": ["procedure"]},
+        ])
+
+        assert "RELEVANT MEMORY" in result
+        assert "deploy via make deploy" in result
+        # preference type should be filtered out
+        assert "use TDD always" not in result
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_multiple_requests(self, mock_get_mem0: MagicMock) -> None:
+        mock_mem0 = MagicMock()
+        mock_get_mem0.return_value = mock_mem0
+        mock_mem0.search.return_value = {
+            "results": [
+                {"memory": "chose Qdrant for vectors", "metadata": {"type": "decision", "scope": "project"}},
+            ],
+        }
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([
+            {"query": "database choice", "scopes": ["project"], "types": ["decision"]},
+            {"query": "team conventions", "scopes": ["team"], "types": ["preference"]},
+        ])
+
+        assert "RELEVANT MEMORY" in result
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_empty_when_no_requests(self, mock_get_mem0: MagicMock) -> None:
+        mock_get_mem0.return_value = MagicMock()
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        assert ma.recall_filtered([]) == ""
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_no_type_filter_returns_all(self, mock_get_mem0: MagicMock) -> None:
+        mock_mem0 = MagicMock()
+        mock_get_mem0.return_value = mock_mem0
+        mock_mem0.search.return_value = {
+            "results": [
+                {"memory": "any memory", "metadata": {"type": "fact"}},
+            ],
+        }
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([
+            {"query": "something", "scopes": ["project"], "types": []},
+        ])
+
+        assert "any memory" in result
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_graceful_when_mem0_down(self, mock_get_mem0: MagicMock) -> None:
+        mock_get_mem0.return_value = None
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([{"query": "test", "scopes": ["project"], "types": ["decision"]}])
         assert result == ""
 
 

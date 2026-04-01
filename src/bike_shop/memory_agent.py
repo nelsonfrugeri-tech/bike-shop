@@ -1,7 +1,9 @@
 """Memory agent — Mem0/Qdrant long-term memory for cross-thread context.
 
-Mem0 is only used when starting a NEW Slack thread (no existing session_id).
-Within a thread, --resume handles full conversation continuity.
+Two recall modes:
+  1. Full recall — on new threads (no session_id), queries all 3 scopes
+  2. Router recall — on any thread, router requests specific memory lookups
+     filtered by scope + type based on semantic analysis of the message
 """
 
 from __future__ import annotations
@@ -58,15 +60,10 @@ class MemoryAgent:
         *,
         has_session: bool = False,
     ) -> str:
-        """Search Mem0 for relevant long-term context.
+        """Full recall — all 3 scopes, only on new threads.
 
-        Only queries Mem0 when has_session=False (new thread).
-        When --resume is active, the CLI already has full thread history.
-
-        Performs 3 lookups:
-            Mem0: agent memory (limit=5), project memory (limit=5), team memory (limit=3)
-
-        Returns formatted string with sections, or "" if nothing found.
+        When --resume is active, the CLI already has full thread history,
+        so this returns "" unless the router also requests specific memories.
         """
         if has_session:
             return ""
@@ -74,12 +71,11 @@ class MemoryAgent:
         if not self._mem0_enabled:
             return ""
 
-        sections: list[str] = []
-
         mem0 = get_mem0()
         if not mem0:
             return ""
 
+        sections: list[str] = []
         scopes = [
             ("LONG-TERM — Agent memory", self._uid_agent, 5),
             ("LONG-TERM — Project memory", self._uid_project, 5),
@@ -112,6 +108,98 @@ class MemoryAgent:
             + "\n\n".join(sections)
             + "\n--- END MEMORY ---\n"
         )
+
+    def recall_filtered(
+        self,
+        memory_requests: list[dict[str, Any]],
+    ) -> str:
+        """Router-driven recall — searches Mem0 filtered by scope + type.
+
+        Args:
+            memory_requests: list of dicts from router, each with:
+                - query: str — what to search for
+                - scopes: list[str] — which scopes to search (team, project, agent)
+                - types: list[str] — which memory types to filter (decision, procedure, etc.)
+
+        Returns formatted string with results, or "" if nothing found.
+        """
+        if not self._mem0_enabled or not memory_requests:
+            return ""
+
+        mem0 = get_mem0()
+        if not mem0:
+            return ""
+
+        sections: list[str] = []
+
+        with ThreadPoolExecutor(max_workers=len(memory_requests) * 3) as pool:
+            futures: dict[Any, str] = {}
+
+            for req in memory_requests:
+                query = req.get("query", "")
+                scopes = req.get("scopes", ["project"])
+                types = req.get("types", [])
+
+                if not query:
+                    continue
+
+                for scope in scopes:
+                    uid = self._scope_to_user_id(scope)
+                    label = f"Memory ({scope}): {query}"
+                    futures[pool.submit(
+                        self._search_filtered, mem0, query, uid, types,
+                    )] = label
+
+            for future in as_completed(futures):
+                label = futures[future]
+                try:
+                    memories = future.result(timeout=5)
+                    if memories:
+                        sections.append(f"{label}:\n" + "\n".join(f"  - {m}" for m in memories))
+                except Exception as e:
+                    logger.warning("[memory-agent] Filtered recall failed for %s: %s", label, e)
+
+        if not sections:
+            return ""
+
+        return (
+            "\n\n--- RELEVANT MEMORY (router-requested) ---\n"
+            + "\n\n".join(sections)
+            + "\n--- END MEMORY ---\n"
+        )
+
+    @staticmethod
+    def _search_filtered(
+        mem0: Any,
+        query: str,
+        user_id: str,
+        types: list[str],
+        limit: int = 5,
+    ) -> list[str]:
+        """Search Mem0 and filter results by memory type metadata."""
+        results = mem0.search(query, user_id=user_id, limit=limit)
+        memories = []
+
+        if not results:
+            return memories
+
+        for r in results.get("results", []) if isinstance(results, dict) else results:
+            if not isinstance(r, dict):
+                continue
+            text = r.get("memory", "")
+            if not text:
+                continue
+
+            # Filter by type if specified
+            if types:
+                metadata = r.get("metadata", {}) or {}
+                mem_type = metadata.get("type", "")
+                if mem_type not in types:
+                    continue
+
+            memories.append(text)
+
+        return memories
 
     def observe(
         self,

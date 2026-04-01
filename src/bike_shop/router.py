@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from bike_shop.config import MODEL_MAP
+from bike_shop.memory_schema import scopes_description, types_description
 from bike_shop.observability import Tracer
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "claude-sonnet-4-20250514")
 _ROUTER_PROMPT_TEMPLATE = """You are a semantic router. Analyze the user message and the thread context to decide:
 1. Which specialized agent should handle this task
 2. Which model (complexity level) should power it
+3. Whether long-term memory should be consulted
 
 Available agents:
 {agent_list}
@@ -33,8 +35,16 @@ IMPORTANT: Consider the thread context. If there is an ongoing complex task (imp
 maintain the appropriate model even if the current message is simple (e.g. "how's it going?" in an implementation
 thread should keep sonnet/opus, not downgrade to haiku).
 
+Memory lookup: If the message references or requires knowledge about past decisions, team preferences, procedures,
+facts, or outcomes from OTHER conversations, request a memory lookup. Each lookup specifies:
+- query: what to search for (concise, specific)
+- scopes: which scopes to search — {scopes}
+- types: which memory types to filter — {types}
+
+Return an EMPTY "memory" array if the message is self-contained and doesn't need cross-thread context.
+
 Respond ONLY with valid JSON, nothing else:
-{{"agent": "name_or_none", "model": "opus|sonnet|haiku", "reason": "brief explanation"}}
+{{"agent": "name_or_none", "model": "opus|sonnet|haiku", "reason": "brief explanation", "memory": [{{"query": "search text", "scopes": ["project"], "types": ["decision"]}}]}}
 {thread_context}
 User message:
 """
@@ -144,7 +154,12 @@ class SemanticRouter:
         ctx = ""
         if thread_context:
             ctx = f"\nThread context (recent messages):\n{thread_context}\n\n"
-        return _ROUTER_PROMPT_TEMPLATE.format(agent_list=agent_lines, thread_context=ctx)
+        return _ROUTER_PROMPT_TEMPLATE.format(
+            agent_list=agent_lines,
+            thread_context=ctx,
+            scopes=scopes_description(),
+            types=types_description(),
+        )
 
     def route(self, message: str, thread_context: str = "") -> dict:
         """Classify a message. Returns {"agent": str|None, "model": str, "reason": str}."""
@@ -193,17 +208,26 @@ class SemanticRouter:
                 model = "sonnet"
 
             reason = decision.get("reason", "")
+            memory = decision.get("memory", [])
             model_id = MODEL_MAP[model]
 
+            # Validate memory requests
+            if not isinstance(memory, list):
+                memory = []
+            memory = [
+                m for m in memory
+                if isinstance(m, dict) and m.get("query")
+            ]
+
             logger.info(
-                "[router] agent=%s model=%s reason=%s (%.0fms)",
-                agent or "direct", model, reason, duration_ms,
+                "[router] agent=%s model=%s memory_lookups=%d reason=%s (%.0fms)",
+                agent or "direct", model, len(memory), reason, duration_ms,
             )
 
             # Trace to Langfuse
             self._tracer.trace_call(
                 user_message=message[:300],
-                response=json.dumps({"agent": agent, "model": model, "reason": reason}),
+                response=json.dumps({"agent": agent, "model": model, "reason": reason, "memory": memory}),
                 model=ROUTER_MODEL,
                 duration_ms=duration_ms,
                 input_tokens=None,
@@ -214,7 +238,7 @@ class SemanticRouter:
                 errors=[],
             )
 
-            return {"agent": agent, "model": model_id, "model_name": model, "reason": reason}
+            return {"agent": agent, "model": model_id, "model_name": model, "reason": reason, "memory": memory}
 
         except (json.JSONDecodeError, subprocess.TimeoutExpired, Exception) as e:
             duration_ms = (time.time() - start) * 1000
@@ -222,4 +246,4 @@ class SemanticRouter:
 
             self._tracer.trace_error(error=str(e), context=message[:300])
 
-            return {"agent": None, "model": MODEL_MAP["sonnet"], "model_name": "sonnet", "reason": "router_fallback"}
+            return {"agent": None, "model": MODEL_MAP["sonnet"], "model_name": "sonnet", "reason": "router_fallback", "memory": []}
