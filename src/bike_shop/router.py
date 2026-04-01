@@ -14,9 +14,9 @@ from bike_shop.observability import Tracer
 
 logger = logging.getLogger(__name__)
 
-ROUTER_MODEL = "claude-haiku-4-5-20251001"
+ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "claude-sonnet-4-20250514")
 
-_ROUTER_PROMPT_TEMPLATE = """You are a semantic router. Analyze the user message and decide:
+_ROUTER_PROMPT_TEMPLATE = """You are a semantic router. Analyze the user message and the thread context to decide:
 1. Which specialized agent should handle this task
 2. Which model (complexity level) should power it
 
@@ -27,11 +27,15 @@ Available agents:
 Model selection rules:
 - opus: deep thinking, complex architecture, difficult debugging, multi-step reasoning, long feature development, deep research
 - sonnet: standard coding, reviews, implementation, moderate tasks
-- haiku: confirmations, simple questions, status checks, short lookups
+- haiku: ONLY for truly standalone simple questions with no ongoing task context
+
+IMPORTANT: Consider the thread context. If there is an ongoing complex task (implementation, architecture, review),
+maintain the appropriate model even if the current message is simple (e.g. "how's it going?" in an implementation
+thread should keep sonnet/opus, not downgrade to haiku).
 
 Respond ONLY with valid JSON, nothing else:
 {{"agent": "name_or_none", "model": "opus|sonnet|haiku", "reason": "brief explanation"}}
-
+{thread_context}
 User message:
 """
 
@@ -98,9 +102,8 @@ class SemanticRouter:
     def __init__(self, experts_dir: str | None = None) -> None:
         self._tracer = Tracer("semantic-router")
         self._experts_dir = experts_dir or self.EXPERTS_DIR
-        experts = self._discover_experts()
-        self._validated_experts: set[str] = set(experts.keys())
-        self._router_prompt = self._build_prompt(experts)
+        self._experts = self._discover_experts()
+        self._validated_experts: set[str] = set(self._experts.keys())
 
     def _discover_experts(self) -> dict[str, str]:
         """Scan experts directory for .md files and parse frontmatter.
@@ -133,30 +136,35 @@ class SemanticRouter:
             )
         return experts
 
-    def _build_prompt(self, experts: dict[str, str]) -> str:
+    def _build_prompt(self, experts: dict[str, str], thread_context: str = "") -> str:
         """Build the router prompt dynamically from discovered experts."""
         agent_lines = "\n".join(
             f"- {name}: {desc}" for name, desc in sorted(experts.items())
         )
-        return _ROUTER_PROMPT_TEMPLATE.format(agent_list=agent_lines)
+        ctx = ""
+        if thread_context:
+            ctx = f"\nThread context (recent messages):\n{thread_context}\n\n"
+        return _ROUTER_PROMPT_TEMPLATE.format(agent_list=agent_lines, thread_context=ctx)
 
-    def route(self, message: str) -> dict:
+    def route(self, message: str, thread_context: str = "") -> dict:
         """Classify a message. Returns {"agent": str|None, "model": str, "reason": str}."""
         start = time.time()
+        prompt = self._build_prompt(self._experts, thread_context)
 
         try:
+            # Pass prompt via stdin to avoid CLI arg size limits and shell escaping
             result = subprocess.run(
                 [
-                    "claude", "-p", self._router_prompt + message,
+                    "claude", "-p", "-",
                     "--model", ROUTER_MODEL,
                     "--dangerously-skip-permissions",
                     "--output-format", "text",
                     "--max-turns", "1",
                 ],
-                stdin=subprocess.DEVNULL,
+                input=prompt + message,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=120,
                 cwd=os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
             )
 

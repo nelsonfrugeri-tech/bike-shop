@@ -156,9 +156,9 @@ class TestDiscoverExperts:
         router = SemanticRouter(experts_dir=str(tmp_path))
 
         assert router._validated_experts == {"alpha", "beta"}
-        assert "- alpha: First expert" in router._router_prompt
-        assert "- beta: Second expert" in router._router_prompt
-        assert "- none:" in router._router_prompt
+        assert "- alpha: First expert" in router._build_prompt(router._experts)
+        assert "- beta: Second expert" in router._build_prompt(router._experts)
+        assert "- none:" in router._build_prompt(router._experts)
 
     @patch("bike_shop.router.Tracer")
     def test_empty_directory_fallback(
@@ -170,7 +170,7 @@ class TestDiscoverExperts:
         router = SemanticRouter(experts_dir=str(empty))
 
         assert len(router._validated_experts) == 0
-        assert "- none:" in router._router_prompt
+        assert "- none:" in router._build_prompt(router._experts)
 
     @patch("bike_shop.router.Tracer")
     def test_prompt_contains_no_hardcoded_experts(
@@ -181,10 +181,10 @@ class TestDiscoverExperts:
         router = SemanticRouter(experts_dir=str(tmp_path))
 
         # Should NOT contain old hardcoded experts as agent entries
-        assert "- dev-py:" not in router._router_prompt
-        assert "- architect:" not in router._router_prompt
+        assert "- dev-py:" not in router._build_prompt(router._experts)
+        assert "- architect:" not in router._build_prompt(router._experts)
         # Should contain the discovered one
-        assert "only-one" in router._router_prompt
+        assert "only-one" in router._build_prompt(router._experts)
 
     @patch("bike_shop.router.Tracer")
     def test_skips_unparseable_files(
@@ -288,9 +288,9 @@ class TestRoute:
 
         assert result["agent"] == "dev-py"
         assert result["model_name"] == "opus"
-        # Verify the dynamic prompt was passed to subprocess
-        call_args = mock_run.call_args[0][0]
-        assert "dev-py" in call_args[2]  # prompt is 3rd arg after "claude", "-p"
+        # Verify the dynamic prompt was passed via stdin (input kwarg)
+        call_kwargs = mock_run.call_args[1]
+        assert "dev-py" in call_kwargs.get("input", "")
 
     @patch("bike_shop.router.Tracer")
     @patch("bike_shop.router.subprocess.run")

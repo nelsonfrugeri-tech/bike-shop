@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 
 from slack_bolt import App
@@ -29,7 +30,7 @@ from bike_shop.slack.context import (
 
 logger = logging.getLogger(__name__)
 
-MAX_AGENT_INTERACTIONS = 5
+MAX_AGENT_INTERACTIONS = int(os.environ.get("MAX_AGENT_INTERACTIONS", "20"))
 
 # Track agent-to-agent messages per thread: thread_ts -> count
 _agent_interactions: dict[str, int] = {}
@@ -142,8 +143,8 @@ class SlackAgentHandler:
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
 
-        # Recall relevant memories (Redis short-term + Mem0 long-term)
-        shared_memory = self._memory_agent.recall(question, channel=channel, thread_ts=thread_ts)
+        # Mem0 only on new threads (no session_id) — --resume handles in-thread context
+        shared_memory = self._memory_agent.recall(question, has_session=session_id is not None)
         prompt = _build_prompt(config, context, question, github_token, shared_memory)
 
         response, new_session_id = self._provider.call(
@@ -170,11 +171,11 @@ class SlackAgentHandler:
         """Process LLM call in background thread and reply when done."""
         config = self._config
         try:
-            # Push user message to Redis short-term BEFORE LLM call
-            self._memory_agent.push_user_message(user_name, question, channel, thread_ts)
+            # Build context from Mem0 for router awareness
+            router_context = self._memory_agent.get_router_context(question)
 
-            # Semantic Router — decide agent + model
-            route = self._router.route(question)
+            # Semantic Router — decide agent + model (with thread context)
+            route = self._router.route(question, thread_context=router_context)
             agent_override = route.get("agent")
             model_override = route.get("model")
             router_model_name = route.get("model_name", "sonnet")
@@ -228,6 +229,10 @@ class SlackAgentHandler:
                 user_name=user_name,
             )
 
+            # Strip markdown bold/italic wrapping mentions — Slack won't generate
+            # app_mention events if <@USER_ID> is inside **bold** or *italic*
+            reply = re.sub(r'\*{1,2}(<@[A-Z0-9]+>)\*{1,2}', r'\1', reply)
+
             # Suppress empty/no-action responses — don't waste Slack messages
             skip_phrases = {"no response requested", "no action needed", "nothing to do", "..."}
             if reply.strip().lower().rstrip(".!") in skip_phrases or len(reply.strip()) < 5:
@@ -244,8 +249,15 @@ class SlackAgentHandler:
         if not text:
             return
 
+        # bot_message events use "bot_id" instead of "user"
         user_id = event.get("user", "")
-        if user_id == self._config.bot_user_id:
+        bot_id = event.get("bot_id", "")
+        is_bot_msg = event.get("subtype") == "bot_message"
+
+        # Skip own messages (check both user_id and bot_id)
+        if user_id and user_id == self._config.bot_user_id:
+            return
+        if is_bot_msg and bot_id == self._config.bot_id:
             return
 
         if not is_mentioned(text, self._config.bot_user_id):
@@ -258,7 +270,7 @@ class SlackAgentHandler:
         thread_ts = event.get("thread_ts") or event.get("ts")
 
         # Track agent-to-agent interactions and enforce limit
-        is_from_agent = user_id in _get_bot_user_ids()
+        is_from_agent = is_bot_msg or (user_id in _get_bot_user_ids())
         if is_from_agent:
             count = _agent_interactions.get(thread_ts, 0)
             if count >= MAX_AGENT_INTERACTIONS:
@@ -274,7 +286,12 @@ class SlackAgentHandler:
                 self._config.name, count + 1, MAX_AGENT_INTERACTIONS, thread_ts,
             )
 
-        user_name = resolve_user(client, user_id) if user_id else "someone"
+        if user_id:
+            user_name = resolve_user(client, user_id)
+        elif is_bot_msg:
+            user_name = event.get("username", "agent")
+        else:
+            user_name = "someone"
         channel = event["channel"]
 
         context = get_thread_context(client, channel, thread_ts)
@@ -319,6 +336,11 @@ class SlackAgentHandler:
 
         @app.event("app_mention")
         def handle_mention(event, say, client):
+            self._handle_message(event, say, client)
+
+        @app.event({"type": "message", "subtype": "bot_message"})
+        def handle_bot_message(event, say, client):
+            """Handle messages from other bots (agent-to-agent collaboration)."""
             self._handle_message(event, say, client)
 
         @app.event("message")
