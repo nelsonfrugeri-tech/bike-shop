@@ -171,11 +171,8 @@ class SlackAgentHandler:
         """Process LLM call in background thread and reply when done."""
         config = self._config
         try:
-            # Build context from Mem0 for router awareness
-            router_context = self._memory_agent.get_router_context(question)
-
-            # Semantic Router — decide agent + model (with thread context)
-            route = self._router.route(question, thread_context=router_context)
+            # Semantic Router — decide agent + model (with Slack thread context)
+            route = self._router.route(question, thread_context=context)
             agent_override = route.get("agent")
             model_override = route.get("model")
             router_model_name = route.get("model_name", "sonnet")

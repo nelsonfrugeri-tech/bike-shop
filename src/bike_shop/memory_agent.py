@@ -112,29 +112,6 @@ class MemoryAgent:
             + "\n--- END MEMORY ---\n"
         )
 
-    def get_router_context(
-        self, query: str,
-    ) -> str:
-        """Build compact context for the Semantic Router (Mem0 only)."""
-        mem0 = get_mem0()
-        if not mem0:
-            return ""
-
-        try:
-            project_uid = f"team:{self._project_id}"
-            results = mem0.search(query, user_id=project_uid, limit=3)
-            memories = []
-            for r in (results.get("results", []) if isinstance(results, dict) else results):
-                text = r.get("memory", "") if isinstance(r, dict) else str(r)
-                if text:
-                    memories.append(f"- {text[:150]}")
-            if memories:
-                return "Project knowledge:\n" + "\n".join(memories)
-        except Exception:
-            pass
-
-        return ""
-
     def observe(
         self,
         agent_name: str,
