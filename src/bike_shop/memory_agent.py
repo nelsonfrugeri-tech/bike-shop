@@ -7,6 +7,7 @@ Within a thread, --resume handles full conversation continuity.
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -122,20 +123,29 @@ class MemoryAgent:
         route_decision: dict[str, Any] | None = None,
         user_name: str = "",
     ) -> None:
-        """Observe a message exchange and selectively extract to Mem0.
+        """Fire-and-forget: extract memories in a background thread.
 
-        Args:
-            agent_name: Display name of the agent.
-            user_message: The user's message (without user_name prefix).
-            agent_response: The agent's response.
-            channel: Slack channel ID.
-            thread_ts: Slack thread timestamp.
-            route_decision: Router decision dict (agent, model, model_name, reason).
-            user_name: Display name of the user who sent the message.
+        The Slack response is already sent before this runs, so there's no
+        user-facing latency. The extraction subprocess (Haiku ~2-5s) runs
+        without blocking the handler's daemon thread.
         """
         if not self._mem0_enabled:
             return
 
+        thread = threading.Thread(
+            target=self._observe_sync,
+            args=(agent_name, user_message, agent_response),
+            daemon=True,
+        )
+        thread.start()
+
+    def _observe_sync(
+        self,
+        agent_name: str,
+        user_message: str,
+        agent_response: str,
+    ) -> None:
+        """Synchronous extraction + storage. Runs in background thread."""
         mem0 = get_mem0()
         if not mem0:
             return
