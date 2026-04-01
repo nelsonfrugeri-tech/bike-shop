@@ -29,6 +29,7 @@ class AgentConfig:
     system_prompt: str
     agent_key: str = ""
     bot_user_id: str = ""
+    bot_id: str = ""
     default_model: str = "sonnet"
     github_app_id: str = ""
     github_pem_path: str = ""
@@ -68,6 +69,7 @@ def load_config(agent_name: str) -> AgentConfig:
         client = WebClient(token=bot_token)
         auth = client.auth_test()
         bot_user_id = auth.get("user_id", "")
+        bot_id = auth.get("bot_id", "")
     except Exception as e:
         raise SystemExit(f"Failed to authenticate {agent_name}: {e}")
 
@@ -86,6 +88,7 @@ def load_config(agent_name: str) -> AgentConfig:
         system_prompt=persona["system_prompt"],
         agent_key=agent_name,
         bot_user_id=bot_user_id,
+        bot_id=bot_id,
         default_model=default_model,
         github_app_id=github_app_id,
         github_pem_path=github_pem_path,

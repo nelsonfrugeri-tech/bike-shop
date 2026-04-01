@@ -8,20 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Two-tier memory architecture** — Redis (short-term) + Mem0/Qdrant (long-term)
-  - Short-term: per-agent, per-project, per-thread conversation buffers in Redis (24h TTL)
-  - Long-term: three scopes — team (global), project (shared), agent (private)
-  - Selective extraction via Haiku — only facts, decisions, and outcomes enter long-term memory
-  - TTL summarization cron — conversations are summarized before Redis eviction, stored in Mem0
-  - Route decision tracking — every message records which expert and model the router selected
-- Redis service added to Docker Compose (redis:7.4-alpine)
-- `redis==5.2.1` dependency added
-- `python -m bike_shop.summarizer` — standalone cron entry point for TTL summarization
+- **Unified memory schema** (`memory_schema.py`) — single source of truth for memory scopes and types, shared between extraction (write) and router recall (read)
+- **Router-driven memory recall** — Semantic Router analyzes message intent and requests targeted Mem0 lookups filtered by scope (team, project, agent) and type (decision, fact, preference, procedure, outcome)
+- **`recall_filtered()`** — parallel Mem0 searches with scope + type metadata filtering
 
 ### Changed
-- `MemoryAgent` refactored: constructor takes `agent_key`, recall does 5 parallel lookups (3 Mem0 + 2 Redis)
-- `observe()` now runs selective extraction instead of storing raw exchanges
-- Memory scoped by team/project/agent instead of single shared pool
+- **Memory architecture simplified** — removed Redis short-term, `--resume` handles in-thread continuity
+  - `--resume` already loads full conversation history within a Slack thread — Redis was duplicating context
+  - Mem0 full recall only on **new threads** (no existing `session_id`)
+  - Router-driven filtered recall works on **any thread** — agents can access cross-thread decisions even mid-conversation
+- **Semantic Router** now receives Slack thread context and classifies memory intent alongside agent + model selection
+- **Memory extraction is fire-and-forget** — `observe()` runs Haiku extraction in a background daemon thread, freeing the handler immediately after Slack reply
+- `bot_id` added to `AgentConfig` for accurate bot message detection
+
+### Removed
+- `short_term.py` — Redis short-term memory (redundant with `--resume`)
+- `redis_client.py` — Redis connection singleton
+- `summarizer.py` — TTL summarization cron (depended on Redis)
+- `redis==5.2.1` dependency
+- Redis service from Docker Compose
 
 ## [v0.2.0] - 2026-03-31
 

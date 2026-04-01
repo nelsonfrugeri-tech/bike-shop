@@ -1,25 +1,26 @@
-"""Two-tier memory agent — Redis (short-term) + Mem0/Qdrant (long-term).
+"""Memory agent — Mem0/Qdrant long-term memory for cross-thread context.
 
-Short-term: per-agent, per-project, per-thread conversation buffers in Redis (24h TTL).
-Long-term: three scopes — team (global), project (shared), agent (private) in Mem0.
+Two recall modes:
+  1. Full recall — on new threads (no session_id), queries all 3 scopes
+  2. Router recall — on any thread, router requests specific memory lookups
+     filtered by scope + type based on semantic analysis of the message
 """
 
 from __future__ import annotations
 
 import logging
-import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from bike_shop.extraction import extract_memories
 from bike_shop.mem0_client import get_mem0
-from bike_shop.short_term import ShortTermMemory
 
 logger = logging.getLogger(__name__)
 
 
 class MemoryAgent:
-    """Two-tier memory: Redis short-term + Mem0 long-term with scoped access.
+    """Long-term memory via Mem0 with scoped access.
 
     Scopes (Mem0 user_id patterns):
         Team:    "team"                    — leader preferences, global procedures
@@ -30,7 +31,6 @@ class MemoryAgent:
     def __init__(self, agent_key: str, project_id: str = "bike-shop") -> None:
         self._agent_key = agent_key
         self._project_id = project_id
-        self._short_term = ShortTermMemory()
 
         # Mem0 scoped user_ids
         self._uid_team = "team"
@@ -57,150 +57,186 @@ class MemoryAgent:
     def recall(
         self,
         query: str,
-        channel: str = "",
-        thread_ts: str = "",
+        *,
+        has_session: bool = False,
     ) -> str:
-        """Search both tiers for relevant context.
+        """Full recall — all 3 scopes, only on new threads.
 
-        Performs 5 lookups:
-            Mem0: agent memory (limit=5), project memory (limit=5), team memory (limit=3)
-            Redis: thread buffer (limit=20), recent activity (limit=10)
-
-        Returns formatted string with sections, or "" if nothing found.
+        When --resume is active, the CLI already has full thread history,
+        so this returns "" unless the router also requests specific memories.
         """
+        if has_session:
+            return ""
+
+        if not self._mem0_enabled:
+            return ""
+
+        mem0 = get_mem0()
+        if not mem0:
+            return ""
+
         sections: list[str] = []
-
-        # --- Redis short-term ---
-        if channel and thread_ts:
-            thread_msgs = self._short_term.get_thread(
-                self._agent_key, self._project_id, channel, thread_ts,
-            )
-            if thread_msgs:
-                lines = []
-                for m in reversed(thread_msgs):  # oldest first
-                    role = m.get("role", "?")
-                    author = m.get("author", "")
-                    content = m.get("content", "")
-                    prefix = f"{author} ({role})" if author else role
-                    lines.append(f"  - {prefix}: {content[:200]}")
-                sections.append("SHORT-TERM — Thread:\n" + "\n".join(lines))
-
-        recent_msgs = self._short_term.get_recent(self._agent_key, self._project_id)
-        if recent_msgs:
-            lines = []
-            for m in reversed(recent_msgs):  # oldest first
-                content = m.get("content", "")
-                author = m.get("author", "")
-                lines.append(f"  - {author}: {content[:150]}")
-            sections.append("SHORT-TERM — Recent activity:\n" + "\n".join(lines))
-
-        # --- Mem0 long-term (parallel lookups) ---
-        if self._mem0_enabled:
-            mem0 = get_mem0()
-            if mem0:
-                scopes = [
-                    ("LONG-TERM — Agent memory", self._uid_agent, 5),
-                    ("LONG-TERM — Project memory", self._uid_project, 5),
-                    ("LONG-TERM — Team memory", self._uid_team, 3),
-                ]
-                with ThreadPoolExecutor(max_workers=3) as pool:
-                    futures = {}
-                    for label, uid, lim in scopes:
-                        futures[pool.submit(mem0.search, query, user_id=uid, limit=lim)] = label
-                    for future in as_completed(futures):
-                        label = futures[future]
-                        try:
-                            results = future.result(timeout=5)
-                            memories = []
-                            if results and results.get("results"):
-                                for r in results["results"]:
-                                    text = r.get("memory", "")
-                                    if text:
-                                        memories.append(f"  - {text}")
-                            if memories:
-                                sections.append(f"{label}:\n" + "\n".join(memories))
-                        except Exception as e:
-                            logger.warning("[memory-agent] Failed to recall %s: %s", label, e)
+        scopes = [
+            ("LONG-TERM — Agent memory", self._uid_agent, 5),
+            ("LONG-TERM — Project memory", self._uid_project, 5),
+            ("LONG-TERM — Team memory", self._uid_team, 3),
+        ]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {}
+            for label, uid, lim in scopes:
+                futures[pool.submit(mem0.search, query, user_id=uid, limit=lim)] = label
+            for future in as_completed(futures):
+                label = futures[future]
+                try:
+                    results = future.result(timeout=5)
+                    memories = []
+                    if results and results.get("results"):
+                        for r in results["results"]:
+                            text = r.get("memory", "")
+                            if text:
+                                memories.append(f"  - {text}")
+                    if memories:
+                        sections.append(f"{label}:\n" + "\n".join(memories))
+                except Exception as e:
+                    logger.warning("[memory-agent] Failed to recall %s: %s", label, e)
 
         if not sections:
             return ""
 
         return (
-            "\n\n--- PROJECT MEMORY ---\n"
+            "\n\n--- PROJECT MEMORY (from previous threads) ---\n"
             + "\n\n".join(sections)
             + "\n--- END MEMORY ---\n"
         )
 
-    def push_user_message(
+    def recall_filtered(
         self,
-        user_name: str,
-        message: str,
-        channel: str,
-        thread_ts: str,
-    ) -> None:
-        """Push user message to Redis short-term BEFORE LLM call."""
-        entry: dict[str, Any] = {
-            "role": "user",
-            "author": user_name,
-            "content": message,
-            "ts": thread_ts,
-        }
-        self._short_term.push(
-            self._agent_key, self._project_id, channel, thread_ts, entry,
+        memory_requests: list[dict[str, Any]],
+    ) -> str:
+        """Router-driven recall — searches Mem0 filtered by scope + type.
+
+        Args:
+            memory_requests: list of dicts from router, each with:
+                - query: str — what to search for
+                - scopes: list[str] — which scopes to search (team, project, agent)
+                - types: list[str] — which memory types to filter (decision, procedure, etc.)
+
+        Returns formatted string with results, or "" if nothing found.
+        """
+        if not self._mem0_enabled or not memory_requests:
+            return ""
+
+        mem0 = get_mem0()
+        if not mem0:
+            return ""
+
+        sections: list[str] = []
+
+        with ThreadPoolExecutor(max_workers=min(len(memory_requests) * 3, 12)) as pool:
+            futures: dict[Any, str] = {}
+
+            for req in memory_requests:
+                query = req.get("query", "")
+                scopes = req.get("scopes", ["project"])
+                types = req.get("types", [])
+
+                if not query:
+                    continue
+
+                for scope in scopes:
+                    uid = self._scope_to_user_id(scope)
+                    label = f"Memory ({scope}): {query}"
+                    futures[pool.submit(
+                        self._search_filtered, mem0, query, uid, types,
+                    )] = label
+
+            for future in as_completed(futures):
+                label = futures[future]
+                try:
+                    memories = future.result(timeout=5)
+                    if memories:
+                        sections.append(f"{label}:\n" + "\n".join(f"  - {m}" for m in memories))
+                except Exception as e:
+                    logger.warning("[memory-agent] Filtered recall failed for %s: %s", label, e)
+
+        if not sections:
+            return ""
+
+        return (
+            "\n\n--- RELEVANT MEMORY (router-requested) ---\n"
+            + "\n\n".join(sections)
+            + "\n--- END MEMORY ---\n"
         )
-        self._short_term.push_recent(self._agent_key, self._project_id, entry)
+
+    @staticmethod
+    def _search_filtered(
+        mem0: Any,
+        query: str,
+        user_id: str,
+        types: list[str],
+        limit: int = 5,
+    ) -> list[str]:
+        """Search Mem0 and filter results by memory type metadata."""
+        # Over-fetch when filtering by type to compensate for client-side filtering
+        fetch_limit = limit * 3 if types else limit
+        results = mem0.search(query, user_id=user_id, limit=fetch_limit)
+        memories = []
+
+        if not results:
+            return memories
+
+        for r in results.get("results", []) if isinstance(results, dict) else results:
+            if not isinstance(r, dict):
+                continue
+            text = r.get("memory", "")
+            if not text:
+                continue
+
+            # Filter by type if specified
+            if types:
+                metadata = r.get("metadata", {}) or {}
+                mem_type = metadata.get("type", "")
+                if mem_type not in types:
+                    continue
+
+            memories.append(text)
+
+        return memories
 
     def observe(
         self,
         agent_name: str,
         user_message: str,
         agent_response: str,
-        channel: str = "",
-        thread_ts: str = "",
-        route_decision: dict[str, Any] | None = None,
-        user_name: str = "",
     ) -> None:
-        """Observe a message exchange: push to Redis + selective extraction to Mem0.
+        """Fire-and-forget: extract memories in a background thread.
 
-        Args:
-            agent_name: Display name of the agent.
-            user_message: The user's message (without user_name prefix).
-            agent_response: The agent's response.
-            channel: Slack channel ID.
-            thread_ts: Slack thread timestamp.
-            route_decision: Router decision dict (agent, model, model_name, reason).
-            user_name: Display name of the user who sent the message.
+        The Slack response is already sent before this runs, so there's no
+        user-facing latency. The extraction subprocess (Haiku ~2-5s) runs
+        without blocking the handler's daemon thread.
         """
-        # 1. Push agent response to Redis short-term
-        route = route_decision or {}
-        entry: dict[str, Any] = {
-            "role": "agent",
-            "author": agent_name,
-            "content": agent_response[:500],
-            "ts": thread_ts,
-            "route": {
-                "agent": route.get("agent", ""),
-                "model": route.get("model", ""),
-                "model_name": route.get("model_name", ""),
-                "reason": route.get("reason", ""),
-            },
-        }
-
-        if channel and thread_ts:
-            self._short_term.push(
-                self._agent_key, self._project_id, channel, thread_ts, entry,
-            )
-        self._short_term.push_recent(self._agent_key, self._project_id, entry)
-
-        # 2. Selective extraction to Mem0
         if not self._mem0_enabled:
             return
 
-        mem0 = get_mem0()
-        if not mem0:
-            return
+        thread = threading.Thread(
+            target=self._observe_sync,
+            args=(agent_name, user_message, agent_response),
+            daemon=True,
+        )
+        thread.start()
 
+    def _observe_sync(
+        self,
+        agent_name: str,
+        user_message: str,
+        agent_response: str,
+    ) -> None:
+        """Synchronous extraction + storage. Runs in background thread."""
         try:
+            mem0 = get_mem0()
+            if not mem0:
+                return
+
             memories = extract_memories(
                 agent_name, user_message, agent_response, self._project_id,
             )
@@ -223,4 +259,4 @@ class MemoryAgent:
                     len(memories), agent_name,
                 )
         except Exception as e:
-            logger.warning("[memory-agent] Failed to store observations: %s", e)
+            logger.warning("[memory-agent] Background extraction failed for %s: %s", agent_name, e)

@@ -1,4 +1,4 @@
-"""Tests for two-tier memory: ShortTermMemory, MemoryAgent, extraction."""
+"""Tests for memory: schema, MemoryAgent scopes, recall, filtered recall, extraction."""
 
 from __future__ import annotations
 
@@ -9,113 +9,35 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# ShortTermMemory
+# Memory Schema — single source of truth
 # ---------------------------------------------------------------------------
 
 
-class TestShortTermMemory:
-    """Tests for Redis-backed short-term memory."""
+class TestMemorySchema:
+    """Tests that memory schema provides consistent domain definitions."""
 
-    def _make_stm(self):
-        from bike_shop.short_term import ShortTermMemory
-        return ShortTermMemory()
+    def test_valid_scopes(self) -> None:
+        from bike_shop.memory_schema import valid_scopes
+        scopes = valid_scopes()
+        assert "team" in scopes
+        assert "project" in scopes
+        assert "agent" in scopes
 
-    def _mock_redis(self):
-        """Create a mock Redis client with pipeline support."""
-        mock_r = MagicMock()
-        mock_pipe = MagicMock()
-        mock_r.pipeline.return_value = mock_pipe
-        mock_pipe.execute.return_value = [1, True, True]
-        return mock_r
+    def test_valid_types(self) -> None:
+        from bike_shop.memory_schema import valid_types
+        types = valid_types()
+        assert "decision" in types
+        assert "fact" in types
+        assert "preference" in types
+        assert "procedure" in types
+        assert "outcome" in types
 
-    @patch("bike_shop.short_term.get_redis")
-    def test_push_writes_to_thread_key(self, mock_get_redis: MagicMock) -> None:
-        mock_r = self._mock_redis()
-        mock_get_redis.return_value = mock_r
-
-        stm = self._make_stm()
-        entry = {"role": "user", "author": "Alice", "content": "hello", "ts": "123"}
-
-        result = stm.push("mr-robot", "bike-shop", "C123", "T456", entry)
-
-        assert result is True
-        mock_r.pipeline.assert_called_once()
-        pipe = mock_r.pipeline.return_value
-        pipe.lpush.assert_called_once()
-        key = pipe.lpush.call_args[0][0]
-        assert key == "bike-shop:mr-robot:bike-shop:C123:T456"
-
-    @patch("bike_shop.short_term.get_redis")
-    def test_push_returns_false_when_redis_unavailable(self, mock_get_redis: MagicMock) -> None:
-        mock_get_redis.return_value = None
-        stm = self._make_stm()
-        result = stm.push("mr-robot", "bike-shop", "C123", "T456", {"role": "user"})
-        assert result is False
-
-    @patch("bike_shop.short_term.get_redis")
-    def test_push_recent_writes_to_recent_key(self, mock_get_redis: MagicMock) -> None:
-        mock_r = self._mock_redis()
-        mock_get_redis.return_value = mock_r
-
-        stm = self._make_stm()
-        entry = {"role": "agent", "author": "Mr. Robot", "content": "done"}
-
-        result = stm.push_recent("mr-robot", "bike-shop", entry)
-
-        assert result is True
-        pipe = mock_r.pipeline.return_value
-        key = pipe.lpush.call_args[0][0]
-        assert key == "bike-shop:mr-robot:bike-shop:recent"
-
-    @patch("bike_shop.short_term.get_redis")
-    def test_get_thread_returns_parsed_entries(self, mock_get_redis: MagicMock) -> None:
-        mock_r = MagicMock()
-        mock_get_redis.return_value = mock_r
-        entries = [
-            json.dumps({"role": "user", "content": "msg2"}),
-            json.dumps({"role": "agent", "content": "msg1"}),
-        ]
-        mock_r.lrange.return_value = entries
-
-        stm = self._make_stm()
-        result = stm.get_thread("mr-robot", "bike-shop", "C123", "T456")
-
-        assert len(result) == 2
-        assert result[0]["content"] == "msg2"
-        assert result[1]["role"] == "agent"
-
-    @patch("bike_shop.short_term.get_redis")
-    def test_get_thread_returns_empty_when_redis_down(self, mock_get_redis: MagicMock) -> None:
-        mock_get_redis.return_value = None
-        stm = self._make_stm()
-        assert stm.get_thread("mr-robot", "bike-shop", "C123", "T456") == []
-
-    @patch("bike_shop.short_term.get_redis")
-    def test_get_recent_returns_parsed_entries(self, mock_get_redis: MagicMock) -> None:
-        mock_r = MagicMock()
-        mock_get_redis.return_value = mock_r
-        mock_r.lrange.return_value = [json.dumps({"role": "user", "content": "hi"})]
-
-        stm = self._make_stm()
-        result = stm.get_recent("elliot", "bike-shop")
-
-        assert len(result) == 1
-        assert result[0]["content"] == "hi"
-
-    @patch("bike_shop.short_term.get_redis")
-    def test_mark_summarized_and_check(self, mock_get_redis: MagicMock) -> None:
-        mock_r = MagicMock()
-        mock_get_redis.return_value = mock_r
-        mock_r.hget.return_value = "1"
-
-        stm = self._make_stm()
-        stm.mark_summarized("bike-shop:mr-robot:bike-shop:C1:T1")
-
-        mock_r.hset.assert_called_once_with(
-            "meta:bike-shop:mr-robot:bike-shop:C1:T1", "summarized", "1",
-        )
-
-        assert stm.is_summarized("bike-shop:mr-robot:bike-shop:C1:T1") is True
+    def test_descriptions_are_strings(self) -> None:
+        from bike_shop.memory_schema import scopes_description, types_description
+        assert isinstance(scopes_description(), str)
+        assert isinstance(types_description(), str)
+        assert "team" in scopes_description()
+        assert "decision" in types_description()
 
 
 # ---------------------------------------------------------------------------
@@ -150,26 +72,28 @@ class TestMemoryAgentScopes:
 
 
 # ---------------------------------------------------------------------------
-# MemoryAgent — recall assembles 3 scopes
+# MemoryAgent — recall (full, new threads only)
 # ---------------------------------------------------------------------------
 
 
 class TestMemoryAgentRecall:
-    """Tests that recall queries all scopes and assembles output."""
+    """Tests that recall queries Mem0 scopes only on new threads."""
 
     @patch("bike_shop.memory_agent.get_mem0")
-    @patch("bike_shop.short_term.get_redis")
-    def test_recall_assembles_all_scopes(
-        self, mock_redis: MagicMock, mock_get_mem0: MagicMock,
-    ) -> None:
-        # Mock Redis
-        mock_r = MagicMock()
-        mock_redis.return_value = mock_r
-        mock_r.lrange.return_value = [
-            json.dumps({"role": "user", "author": "Alice", "content": "test message"}),
-        ]
+    def test_recall_skips_when_session_exists(self, mock_get_mem0: MagicMock) -> None:
+        mock_mem0 = MagicMock()
+        mock_get_mem0.return_value = mock_mem0
 
-        # Mock Mem0
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall("test query", has_session=True)
+
+        assert result == ""
+        mock_mem0.search.assert_not_called()
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_recall_queries_mem0_on_new_thread(self, mock_get_mem0: MagicMock) -> None:
         mock_mem0 = MagicMock()
         mock_get_mem0.return_value = mock_mem0
         mock_mem0.search.return_value = {
@@ -179,23 +103,15 @@ class TestMemoryAgentRecall:
         from bike_shop.memory_agent import MemoryAgent
         ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
 
-        result = ma.recall("test query", channel="C123", thread_ts="T456")
+        result = ma.recall("test query", has_session=False)
 
         assert "PROJECT MEMORY" in result
-        assert "SHORT-TERM" in result
         assert "LONG-TERM" in result
-
-        # Mem0 should be called 3 times (agent, project, team)
+        assert "some remembered fact" in result
         assert mock_mem0.search.call_count == 3
 
     @patch("bike_shop.memory_agent.get_mem0")
-    @patch("bike_shop.short_term.get_redis")
-    def test_recall_returns_empty_when_nothing_found(
-        self, mock_redis: MagicMock, mock_get_mem0: MagicMock,
-    ) -> None:
-        mock_redis.return_value = MagicMock()
-        mock_redis.return_value.lrange.return_value = []
-
+    def test_recall_returns_empty_when_nothing_found(self, mock_get_mem0: MagicMock) -> None:
         mock_mem0 = MagicMock()
         mock_get_mem0.return_value = mock_mem0
         mock_mem0.search.return_value = {"results": []}
@@ -203,21 +119,107 @@ class TestMemoryAgentRecall:
         from bike_shop.memory_agent import MemoryAgent
         ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
 
-        result = ma.recall("anything")
+        result = ma.recall("anything", has_session=False)
         assert result == ""
 
     @patch("bike_shop.memory_agent.get_mem0")
-    @patch("bike_shop.short_term.get_redis")
-    def test_recall_graceful_when_mem0_down(
-        self, mock_redis: MagicMock, mock_get_mem0: MagicMock,
-    ) -> None:
-        mock_redis.return_value = None
+    def test_recall_graceful_when_mem0_down(self, mock_get_mem0: MagicMock) -> None:
         mock_get_mem0.return_value = None
 
         from bike_shop.memory_agent import MemoryAgent
         ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
 
-        result = ma.recall("anything")
+        result = ma.recall("anything", has_session=False)
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# MemoryAgent — recall_filtered (router-driven)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryAgentRecallFiltered:
+    """Tests that recall_filtered queries Mem0 with scope + type filters."""
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_returns_matching_memories(self, mock_get_mem0: MagicMock) -> None:
+        mock_mem0 = MagicMock()
+        mock_get_mem0.return_value = mock_mem0
+        mock_mem0.search.return_value = {
+            "results": [
+                {"memory": "deploy via make deploy", "metadata": {"type": "procedure", "scope": "project"}},
+                {"memory": "use TDD always", "metadata": {"type": "preference", "scope": "team"}},
+            ],
+        }
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([
+            {"query": "deploy process", "scopes": ["project"], "types": ["procedure"]},
+        ])
+
+        assert "RELEVANT MEMORY" in result
+        assert "deploy via make deploy" in result
+        # preference type should be filtered out
+        assert "use TDD always" not in result
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_multiple_requests(self, mock_get_mem0: MagicMock) -> None:
+        mock_mem0 = MagicMock()
+        mock_get_mem0.return_value = mock_mem0
+        mock_mem0.search.return_value = {
+            "results": [
+                {"memory": "chose Qdrant for vectors", "metadata": {"type": "decision", "scope": "project"}},
+            ],
+        }
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([
+            {"query": "database choice", "scopes": ["project"], "types": ["decision"]},
+            {"query": "team conventions", "scopes": ["team"], "types": ["preference"]},
+        ])
+
+        assert "RELEVANT MEMORY" in result
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_empty_when_no_requests(self, mock_get_mem0: MagicMock) -> None:
+        mock_get_mem0.return_value = MagicMock()
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        assert ma.recall_filtered([]) == ""
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_no_type_filter_returns_all(self, mock_get_mem0: MagicMock) -> None:
+        mock_mem0 = MagicMock()
+        mock_get_mem0.return_value = mock_mem0
+        mock_mem0.search.return_value = {
+            "results": [
+                {"memory": "any memory", "metadata": {"type": "fact"}},
+            ],
+        }
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([
+            {"query": "something", "scopes": ["project"], "types": []},
+        ])
+
+        assert "any memory" in result
+
+    @patch("bike_shop.memory_agent.get_mem0")
+    def test_filtered_recall_graceful_when_mem0_down(self, mock_get_mem0: MagicMock) -> None:
+        mock_get_mem0.return_value = None
+
+        from bike_shop.memory_agent import MemoryAgent
+        ma = MemoryAgent(agent_key="mr-robot", project_id="bike-shop")
+
+        result = ma.recall_filtered([{"query": "test", "scopes": ["project"], "types": ["decision"]}])
         assert result == ""
 
 
@@ -241,13 +243,13 @@ class TestExtraction:
     @patch("bike_shop.extraction.subprocess.run")
     def test_extraction_returns_structured_for_decisions(self, mock_run: MagicMock) -> None:
         response_json = json.dumps([
-            {"type": "decision", "scope": "project", "content": "We chose Redis for caching"},
+            {"type": "decision", "scope": "project", "content": "We chose Qdrant for vector storage"},
             {"type": "preference", "scope": "team", "content": "Team prefers TDD approach"},
         ])
         mock_run.return_value = MagicMock(stdout=response_json)
 
         from bike_shop.extraction import extract_memories
-        result = extract_memories("Mr. Robot", "What should we use?", "Let's use Redis...", "bike-shop")
+        result = extract_memories("Mr. Robot", "What should we use?", "Let's use Qdrant...", "bike-shop")
 
         assert len(result) == 2
         assert result[0]["type"] == "decision"
