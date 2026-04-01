@@ -12,6 +12,7 @@ dependencies = [
     "langfuse>=2.0",
     "mem0ai>=0.1",
     "ollama>=0.4",
+    "redis==5.2.1",
 ]
 
 [build-system]
