@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Reserved for v0.3.0 — Two-Tier Memory Architecture._
+### Added
+- **Two-tier memory architecture** — Redis (short-term) + Mem0/Qdrant (long-term)
+  - Short-term: per-agent, per-project, per-thread conversation buffers in Redis (24h TTL)
+  - Long-term: three scopes — team (global), project (shared), agent (private)
+  - Selective extraction via Haiku — only facts, decisions, and outcomes enter long-term memory
+  - TTL summarization cron — conversations are summarized before Redis eviction, stored in Mem0
+  - Route decision tracking — every message records which expert and model the router selected
+- Redis service added to Docker Compose (redis:7.4-alpine)
+- `redis==5.2.1` dependency added
+- `python -m bike_shop.summarizer` — standalone cron entry point for TTL summarization
+
+### Changed
+- `MemoryAgent` refactored: constructor takes `agent_key`, recall does 5 parallel lookups (3 Mem0 + 2 Redis)
+- `observe()` now runs selective extraction instead of storing raw exchanges
+- Memory scoped by team/project/agent instead of single shared pool
 
 ## [v0.2.0] - 2026-03-31
 

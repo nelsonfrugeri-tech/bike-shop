@@ -130,19 +130,20 @@ class SlackAgentHandler:
         self._github = GitHubAuth(config)
         self._switcher = ModelSwitcher()
         self._router = SemanticRouter()
-        self._memory_agent = MemoryAgent()
+        self._memory_agent = MemoryAgent(agent_key=config.agent_key)
 
     def _call_llm(self, context: str, question: str, thread_ts: str,
                   model_override: str | None = None, agent_override: str | None = None,
-                  router_meta: dict | None = None) -> str:
+                  router_meta: dict | None = None,
+                  channel: str = "") -> str:
         """Call the LLM provider and handle session tracking."""
         config = self._config
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
 
-        # Recall relevant memories from Mem0 shared memory
-        shared_memory = self._memory_agent.recall(question)
+        # Recall relevant memories (Redis short-term + Mem0 long-term)
+        shared_memory = self._memory_agent.recall(question, channel=channel, thread_ts=thread_ts)
         prompt = _build_prompt(config, context, question, github_token, shared_memory)
 
         response, new_session_id = self._provider.call(
@@ -164,10 +165,14 @@ class SlackAgentHandler:
         return response
 
     def _process_and_reply(self, say, client: WebClient,
-                           context: str, question: str, thread_ts: str) -> None:
+                           context: str, question: str, thread_ts: str,
+                           channel: str = "", user_name: str = "") -> None:
         """Process LLM call in background thread and reply when done."""
         config = self._config
         try:
+            # Push user message to Redis short-term BEFORE LLM call
+            self._memory_agent.push_user_message(user_name, question, channel, thread_ts)
+
             # Semantic Router — decide agent + model
             route = self._router.route(question)
             agent_override = route.get("agent")
@@ -191,7 +196,8 @@ class SlackAgentHandler:
                                    agent_override=agent_override,
                                    router_meta={"model_name": router_model_name,
                                                 "reason": router_reason,
-                                                "agent": agent_override})
+                                                "agent": agent_override},
+                                   channel=channel)
 
             if self._switcher.has_marker(reply):
                 if not self._switcher.should_escalate(thread_ts):
@@ -202,13 +208,25 @@ class SlackAgentHandler:
                     say("_(pensando mais profundamente...)_", thread_ts=thread_ts)
 
                     reply = self._call_llm(context, question, thread_ts,
-                                           model_override=config.opus_model_id)
+                                           model_override=config.opus_model_id,
+                                           channel=channel)
                     reply = self._switcher.strip_marker(reply)
 
             logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
 
-            # Memory Agent — observe the exchange for fact extraction
-            self._memory_agent.observe(config.name, question, reply)
+            # Memory Agent — observe the exchange for selective extraction
+            route_decision = {
+                "agent": agent_override,
+                "model": model_override or config.model_id,
+                "model_name": router_model_name,
+                "reason": router_reason,
+            }
+            self._memory_agent.observe(
+                config.name, question, reply,
+                channel=channel, thread_ts=thread_ts,
+                route_decision=route_decision,
+                user_name=user_name,
+            )
 
             # Suppress empty/no-action responses — don't waste Slack messages
             skip_phrases = {"no response requested", "no action needed", "nothing to do", "..."}
@@ -267,7 +285,8 @@ class SlackAgentHandler:
 
         thread = threading.Thread(
             target=self._process_and_reply,
-            args=(say, client, context, f"{user_name}: {clean_text}", thread_ts),
+            args=(say, client, context, clean_text, thread_ts, channel),
+            kwargs={"user_name": user_name},
             daemon=True,
         )
         thread.start()
@@ -289,7 +308,8 @@ class SlackAgentHandler:
 
         thread = threading.Thread(
             target=self._process_and_reply,
-            args=(say, client, context, f"{user_name}: {text}", thread_ts),
+            args=(say, client, context, text, thread_ts, channel),
+            kwargs={"user_name": user_name},
             daemon=True,
         )
         thread.start()
