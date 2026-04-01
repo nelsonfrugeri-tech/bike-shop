@@ -74,45 +74,53 @@ The **Semantic Router** dynamically assigns them specialized experts (architect,
 3. SlackAgentHandler receives the event:
    a. Checks if the bot was @mentioned
    b. Fetches thread context (last 20 messages) from Slack API
-   c. Records the message in Mem0 shared memory
 
-4. Semantic Router (haiku, ~1 cent) classifies the message:
-   → { agent: "architect", model: "opus", reason: "system design requires deep thinking" }
+4. Semantic Router classifies the message:
+   → agent + model selection
+   → memory intent: decides if cross-thread memory is needed
+   → { agent: "architect", model: "opus", reason: "...", memory: [{query: "...", scopes: [...], types: [...]}] }
 
-5. MemoryAgent.recall() searches Mem0 for relevant project memories:
-   → "Previously decided to use SQLite with WAL mode"
-   → "Project is a fund analysis system for Brazilian market"
+5. Memory recall (two modes):
+   a. New thread (no session): full recall — searches all 3 Mem0 scopes (agent, project, team)
+   b. Router-driven: filtered recall — targeted searches by scope + type (decision, procedure, etc.)
+   c. Existing thread with --resume and no memory request: skip (--resume has full history)
 
 6. Prompt is assembled:
-   System prompt + Project manifest + Shared memories + Thread context + User message
+   System prompt + Project manifest + Memory context + Thread context + User message
 
 7. Claude Code CLI is called:
-   claude -p "{prompt}" --agent architect --model opus --dangerously-skip-permissions
+   claude -p "{prompt}" --agent architect --model opus --resume {session_id} --dangerously-skip-permissions
 
 8. Response is parsed from stream-json:
    - Text response extracted
    - Tool uses captured (Bash, Write, Read, etc.)
    - Thinking blocks captured
    - Token usage extracted
-   - Session ID stored for thread continuity
+   - Session ID stored for thread continuity (--resume on next message)
 
 9. Full trace sent to Langfuse:
    Trace → Generation → Thinking spans → Tool spans → Error spans
 
-10. MemoryAgent.observe() extracts facts from the exchange and saves to Mem0
+10. MemoryAgent.observe() extracts facts in background (fire-and-forget daemon thread)
+    → Haiku classifies: type (decision/fact/preference/procedure/outcome) + scope (team/project/agent)
+    → Stores in Mem0/Qdrant with metadata for filtered retrieval
 
 11. Response posted back to Slack thread
 ```
 
 ### Semantic Router — The Decision Brain
 
-Every incoming message passes through the Semantic Router before reaching the LLM. It's a lightweight haiku call (~1 cent) that returns a structured decision:
+Every incoming message passes through the Semantic Router before reaching the LLM. It classifies agent, model, and memory intent:
 
 ```json
 {
   "agent": "architect",
   "model": "opus",
-  "reason": "System design with multiple components requires deep architectural thinking"
+  "reason": "System design with multiple components requires deep architectural thinking",
+  "memory": [
+    {"query": "architecture decisions", "scopes": ["project"], "types": ["decision"]},
+    {"query": "deployment procedures", "scopes": ["team"], "types": ["procedure"]}
+  ]
 }
 ```
 
@@ -197,39 +205,49 @@ Slack Workspace
 
 ### Memory System — Mem0
 
-All agents share the **same memory** powered by [Mem0](https://github.com/mem0ai/mem0):
+All agents share long-term memory powered by [Mem0](https://github.com/mem0ai/mem0), with two recall modes:
 
 ```
-┌─────────────────────────────────────────┐
-│              Mem0 (Shared)              │
-│                                         │
-│  "SQLite with WAL mode was decided"     │
-│  "Project is for Brazilian fund market" │
-│  "Always use pytest for tests"          │
-│  "PR #83 merged successfully"           │
-│                                         │
-│         ┌──── Qdrant (vectors) ────┐    │
-│         │  nomic-embed-text (768d) │    │
-│         │  via Ollama (local)      │    │
-│         └──────────────────────────┘    │
-└─────────────────────────────────────────┘
-        ▲                          │
-        │ observe()                │ recall()
-        │ (after response)         │ (before LLM call)
-        │                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Mem0 / Qdrant (Shared)                   │
+│                                                             │
+│  Scopes:          Types:                                    │
+│  ├── team         ├── decision   ("chose Qdrant")           │
+│  ├── project      ├── fact       ("Python 3.12, Next.js")   │
+│  └── agent        ├── preference ("team prefers TDD")       │
+│                   ├── procedure  ("deploy via make deploy")  │
+│                   └── outcome    ("dashboard deployed OK")   │
+│                                                             │
+│  ┌──── Qdrant (vectors) ────┐                               │
+│  │  nomic-embed-text (768d) │                               │
+│  │  via Ollama (local GPU)  │                               │
+│  └──────────────────────────┘                               │
+└─────────────────────────────────────────────────────────────┘
+   ▲ observe()                    │ recall (2 modes)
+   │ (fire-and-forget)            │
+   │                   ┌──────────┴──────────┐
+   │                   │                     │
+   │            Full recall            Filtered recall
+   │          (new threads)         (router-driven)
+   │          3 scopes, all       specific scope + type
+   │                   │                     │
+   │                   └──────────┬──────────┘
+   │                              ▼
    ┌─────────┐  ┌─────────┐  ┌─────────┐
    │Mr. Robot │  │ Elliot  │  │ Tyrell  │
    └─────────┘  └─────────┘  └─────────┘
 ```
 
 **How it works:**
-1. **Before each LLM call** → `recall(question)` searches Mem0 semantically for relevant memories
-2. Relevant memories are injected into the prompt as `--- SHARED PROJECT MEMORY ---`
-3. **After each response** → `observe(agent, question, response)` sends the exchange to Mem0
-4. Mem0 automatically extracts facts, entities, and decisions
-5. All agents read from the same memory — no silos
+1. **New thread** → `recall()` searches all 3 Mem0 scopes for relevant context
+2. **Existing thread** → `--resume` handles in-thread continuity; router may request targeted memory lookups
+3. **Router-driven recall** → Semantic Router classifies memory intent and requests filtered searches by scope + type
+4. **After each response** → `observe()` runs extraction in a background thread (fire-and-forget), Haiku classifies type + scope, stores in Qdrant
+5. All agents read from the same memory — cross-thread, cross-agent knowledge
 
-**Stack:** Qdrant (vector DB) + Ollama (nomic-embed-text, 768 dimensions, local, zero API cost)
+**Domain schema** (`memory_schema.py`): single source of truth for scopes and types — adding a new scope or type automatically propagates to extraction and router recall.
+
+**Stack:** Qdrant (vector DB) + Ollama (nomic-embed-text, 768 dimensions, local GPU, zero API cost)
 
 ---
 
@@ -313,7 +331,8 @@ bike-shop/
 │   ├── config.py                # AgentConfig, MODEL_MAP, env loading
 │   ├── agents.py                # Agent prompts (common rules, no personality)
 │   ├── router.py                # Semantic Router (haiku → agent + model, dynamic expert discovery)
-│   ├── memory_agent.py          # MemoryAgent (Mem0: observe + recall)
+│   ├── memory_agent.py          # MemoryAgent (Mem0: recall, recall_filtered, observe)
+│   ├── memory_schema.py         # Unified memory domain (scopes + types)
 │   ├── observability.py         # Langfuse tracer (traces, spans, errors)
 │   ├── github_auth.py           # GitHub App JWT → installation token
 │   ├── session.py               # Session tracking per Slack thread (24h TTL)

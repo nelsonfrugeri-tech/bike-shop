@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Unified memory schema** (`memory_schema.py`) — single source of truth for memory scopes and types, shared between extraction (write) and router recall (read)
+- **Router-driven memory recall** — Semantic Router analyzes message intent and requests targeted Mem0 lookups filtered by scope (team, project, agent) and type (decision, fact, preference, procedure, outcome)
+- **`recall_filtered()`** — parallel Mem0 searches with scope + type metadata filtering
+
 ### Changed
 - **Memory architecture simplified** — removed Redis short-term, `--resume` handles in-thread continuity
   - `--resume` already loads full conversation history within a Slack thread — Redis was duplicating context
-  - Mem0 now only activates on **new threads** (no existing `session_id`) — provides cross-thread/cross-agent context
-  - Selective extraction via Haiku still stores facts, decisions, and outcomes in Mem0 long-term
-- **Semantic Router** now receives thread context for better model selection in ongoing conversations
+  - Mem0 full recall only on **new threads** (no existing `session_id`)
+  - Router-driven filtered recall works on **any thread** — agents can access cross-thread decisions even mid-conversation
+- **Semantic Router** now receives Slack thread context and classifies memory intent alongside agent + model selection
+- **Memory extraction is fire-and-forget** — `observe()` runs Haiku extraction in a background daemon thread, freeing the handler immediately after Slack reply
 - `bot_id` added to `AgentConfig` for accurate bot message detection
 
 ### Removed
