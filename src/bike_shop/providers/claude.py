@@ -37,6 +37,7 @@ class ClaudeProvider(LLMProvider):
         mcp_config: str | None = None,
         github_token: str | None = None,
         router_meta: dict | None = None,
+        workspace: str | None = None,
     ) -> tuple[str, str | None]:
         model_id = model_override or config.model_id
         tracer = self._get_tracer(config.name)
@@ -75,7 +76,7 @@ class ClaudeProvider(LLMProvider):
                 capture_output=True,
                 text=True,
                 timeout=None,
-                cwd=os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
+                cwd=workspace or os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
                 env=env,
             )
             duration_ms = (time.time() - start_time) * 1000

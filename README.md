@@ -255,8 +255,10 @@ All agents share long-term memory powered by [Mem0](https://github.com/mem0ai/me
 
 | Feature | Description |
 |---------|-------------|
-| 🧠 **Semantic Router** | Haiku classifies every message → selects agent (spirit) + model (opus/sonnet/haiku) |
+| 🧠 **Semantic Router** | Classifies every message → selects agent + model + memory intent |
 | 🧬 **Shared Memory** | Mem0 with semantic search — all agents share the same project memory |
+| 🌿 **Worktree Isolation** | Each agent works in an isolated git worktree — no PR cross-contamination |
+| ⚡ **Message Batching** | Rapid-fire messages are buffered and processed as a single consolidated batch |
 | 📊 **Full Observability** | Langfuse traces: input, output, tokens, tools, thinking, errors, router decisions |
 | 🔄 **Model Switching** | Automatic (router), manual ("think deeply"), self-escalation (`[DEEP_THINK]`) |
 | 🤝 **Smart Collaboration** | Agents tag teammates for PR reviews and blockers — anti-loop (max 5/thread) |
@@ -333,6 +335,8 @@ bike-shop/
 │   ├── router.py                # Semantic Router (haiku → agent + model, dynamic expert discovery)
 │   ├── memory_agent.py          # MemoryAgent (Mem0: recall, recall_filtered, observe)
 │   ├── memory_schema.py         # Unified memory domain (scopes + types)
+│   ├── worktree.py              # Git worktree isolation per agent/task
+│   ├── accumulator.py           # Message batching (buffer window + batch flush)
 │   ├── observability.py         # Langfuse tracer (traces, spans, errors)
 │   ├── github_auth.py           # GitHub App JWT → installation token
 │   ├── session.py               # Session tracking per Slack thread (24h TTL)
@@ -561,7 +565,9 @@ See [MANIFEST.md](MANIFEST.md) for the full process definition.
 | `{AGENT}_GITHUB_INSTALLATION_ID` | | GitHub App installation ID |
 | `PROJECT_LEAD_NAME` | | Project lead's display name (default: "the project lead") |
 | `PROJECT_LEAD_SLACK_ID` | | Project lead's Slack user ID for @mentions |
-| `AGENT_WORKSPACE` | | Directory agents operate in (default: `$HOME`) |
+| `AGENT_WORKSPACE` | | Main repo directory — worktrees are created in `{AGENT_WORKSPACE}/.worktrees/` |
+| `MSG_BUFFER_WINDOW` | | Seconds to buffer rapid-fire messages (default: `3.0`) |
+| `MAX_BATCH_SIZE` | | Max messages per batch before immediate flush (default: `10`) |
 | `LANGFUSE_PUBLIC_KEY` | | Langfuse public key for tracing |
 | `LANGFUSE_SECRET_KEY` | | Langfuse secret key for tracing |
 | `LANGFUSE_HOST` | | Langfuse URL (default: `http://localhost:3000`) |
