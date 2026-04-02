@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import time
 
@@ -11,6 +12,25 @@ from bike_shop.observability import Tracer
 from bike_shop.providers import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+# Timeout tiers based on prompt size (characters)
+# ~4 chars ≈ 1 token (English text average)
+TIMEOUT_SMALL = int(os.environ.get("CLAUDE_TIMEOUT_SMALL", "180"))     # 3 min — < 8k tokens
+TIMEOUT_MEDIUM = int(os.environ.get("CLAUDE_TIMEOUT_MEDIUM", "300"))   # 5 min — 8k-32k tokens
+TIMEOUT_LARGE = int(os.environ.get("CLAUDE_TIMEOUT_LARGE", "600"))     # 10 min — > 32k tokens
+
+CONTEXT_MEDIUM_THRESHOLD = 32_000   # ~8k tokens
+CONTEXT_LARGE_THRESHOLD = 128_000   # ~32k tokens
+
+
+def _select_timeout(prompt: str) -> int:
+    """Select timeout tier based on prompt size."""
+    size = len(prompt)
+    if size >= CONTEXT_LARGE_THRESHOLD:
+        return TIMEOUT_LARGE
+    if size >= CONTEXT_MEDIUM_THRESHOLD:
+        return TIMEOUT_MEDIUM
+    return TIMEOUT_SMALL
 
 
 class ClaudeProvider(LLMProvider):
@@ -66,16 +86,14 @@ class ClaudeProvider(LLMProvider):
         if github_token:
             env["GH_TOKEN"] = github_token
 
-        logger.debug("[%s] Calling Claude CLI (model=%s)...", config.name, model_id)
+        timeout = _select_timeout(prompt)
+        logger.debug("[%s] Calling Claude CLI (model=%s, timeout=%ds, prompt=%d chars)...",
+                     config.name, model_id, timeout, len(prompt))
         start_time = time.time()
 
         try:
-            result = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=None,
+            result = self._run_with_graceful_timeout(
+                cmd, timeout=timeout,
                 cwd=workspace or os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
                 env=env,
             )
@@ -105,11 +123,72 @@ class ClaudeProvider(LLMProvider):
 
             return response, new_session_id
 
+        except subprocess.TimeoutExpired:
+            duration_ms = (time.time() - start_time) * 1000
+            logger.warning("[%s] Claude CLI timed out after %ds (%.0fms)",
+                          config.name, timeout, duration_ms)
+            tracer.trace_error(
+                error=f"Timeout after {timeout}s (prompt={len(prompt)} chars)",
+                context=prompt[-500:],
+            )
+            return f"(timeout after {timeout // 60}min — task was too long, try breaking it into smaller steps)", None
+
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
             logger.error("Claude CLI error: %s", e)
             tracer.trace_error(error=str(e), context=prompt[-500:])
             return "(error)", None
+
+    @staticmethod
+    def _run_with_graceful_timeout(
+        cmd: list[str],
+        timeout: int,
+        cwd: str,
+        env: dict,
+        grace_period: int = 5,
+    ) -> subprocess.CompletedProcess:
+        """Run subprocess with graceful shutdown on timeout.
+
+        On timeout: SIGTERM → wait grace_period → SIGKILL.
+        This kills child processes (uvicorn, servers) cleanly.
+        """
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,  # own process group for clean kill
+        )
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            # Graceful: SIGTERM the entire process group
+            pgid = os.getpgid(proc.pid)
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+            # Wait for grace period
+            try:
+                stdout, stderr = proc.communicate(timeout=grace_period)
+                logger.info("[claude] Process terminated gracefully after SIGTERM")
+                return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                # Force kill the entire process group
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.kill()
+                proc.wait()
+                logger.warning("[claude] Process force-killed after SIGKILL")
+                raise subprocess.TimeoutExpired(cmd, timeout)
 
     def _parse_response(self, stdout: str) -> tuple[str, str | None, dict]:
         """Parse ALL stream-json events. Returns (response_text, session_id, full_usage)."""
