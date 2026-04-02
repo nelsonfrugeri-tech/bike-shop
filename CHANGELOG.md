@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Multiple messages: consolidated prompt with parallel execution instructions
   - `MSG_BUFFER_WINDOW` and `MAX_BATCH_SIZE` env vars for tuning
 - **Batch prompt** with parallel execution instructions — when receiving multiple tasks, Claude analyzes dependencies and uses the Agent tool to spawn sub-agents in isolated worktrees
+- **Dynamic timeout** for Claude CLI — 3min (<8k tokens), 5min (8k-32k tokens), 10min (>32k tokens), based on prompt size
+- **Graceful process kill** on timeout — SIGTERM → 5s grace → SIGKILL with process group cleanup (prevents zombie servers like uvicorn)
 
 ### Previously added
 - **Unified memory schema** (`memory_schema.py`) — single source of truth for memory scopes and types, shared between extraction (write) and router recall (read)
