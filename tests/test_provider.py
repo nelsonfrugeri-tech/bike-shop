@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from io import StringIO
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -235,8 +236,8 @@ class TestParseStream:
 class TestClaudeProviderModeSelection:
     """Tests that the provider selects batch vs streaming correctly."""
 
-    @patch("bike_shop.providers.claude.STREAM_ENABLED", False)
-    @patch("bike_shop.providers.claude.subprocess.run")
+    @patch.dict(os.environ, {"LANGFUSE_STREAM_ENABLED": "false"})
+    @patch.object(ClaudeProvider, "_run_with_graceful_timeout")
     @patch("bike_shop.observability._get_config", return_value=None)
     def test_batch_mode_when_streaming_disabled(
         self, _cfg: MagicMock, mock_run: MagicMock,
@@ -254,7 +255,7 @@ class TestClaudeProviderModeSelection:
         )
 
         provider = ClaudeProvider()
-        response, _ = provider.call(config, "hello")
+        response, _ = provider.call(config, "hello", workspace="/tmp/test-worktree")
 
         mock_run.assert_called_once()
         assert response == "ok"
