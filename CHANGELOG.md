@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Idle-based watchdog** replaces static timeout tiers for Claude CLI batch mode
+  - Monitors stdout activity: kills process only when idle for `CLAUDE_IDLE_TIMEOUT` (default 300s)
+  - Absolute safety net via `CLAUDE_MAX_TIMEOUT` (default 1800s)
+  - Graceful shutdown: SIGTERM -> wait -> SIGKILL to entire process group
+  - Uses `time.monotonic()` for accurate elapsed-time measurement
+  - Dedicated `_stderr_reader` thread for incremental stderr collection
+  - Removes `CLAUDE_TIMEOUT_SMALL/MEDIUM/LARGE` and `_select_timeout()`
+
 ### Added
 - **Hierarchical observability** — real-time tracing with nested spans via Langfuse REST API
   - `Tracer` rewritten with `start_trace()`, `start_span()`, `end_span()`, `start_generation()`, `end_generation()` API
