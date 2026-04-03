@@ -7,9 +7,13 @@ import signal
 import sys
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from dotenv import load_dotenv
+
 from bike_shop.config import AGENT_REGISTRY, load_config
 from bike_shop.handlers import create_handler
 from bike_shop.worktree import cleanup_stale_worktrees, ensure_worktree
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.DEBUG,
