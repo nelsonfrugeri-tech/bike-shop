@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Langfuse spans input/output null** — Langfuse REST API expects JSON objects, not plain strings
+  - Added `_ensure_json_object()` helper that wraps strings/scalars as `{"value": ...}`
+  - Applied to all Tracer methods: `start_trace`, `update_trace`, `start_span`, `end_span`, `start_generation`, `end_generation`
+  - Added meaningful `input=`/`output=` to all handler spans: `message.receive`, `router.classify`, `memory.recall`, `prompt.build`, `llm.call`, `memory.observe`, `slack.reply`
+
 ### Changed
 - **Idle-based watchdog** replaces static timeout tiers for Claude CLI batch mode
   - Monitors stdout activity: kills process only when idle for `CLAUDE_IDLE_TIMEOUT` (default 300s)

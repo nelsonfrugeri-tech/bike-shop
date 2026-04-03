@@ -216,6 +216,7 @@ class SlackAgentHandler:
         # Memory recall: full recall on new threads + router-driven filtered recall
         memory_span_id = tracer.start_span(
             "memory.recall", trace_id=trace_id, parent_id=parent_span_id,
+            input={"question": question[:300]},
         ) if trace_id else None
 
         shared_memory = self._memory_agent.recall(
@@ -236,13 +237,15 @@ class SlackAgentHandler:
         # Build prompt
         prompt_span_id = tracer.start_span(
             "prompt.build", trace_id=trace_id, parent_id=parent_span_id,
+            input={"question_length": len(question)},
         ) if trace_id else None
 
         prompt = _build_prompt(config, context, question, github_token, shared_memory)
 
         if prompt_span_id and trace_id:
             tracer.end_span(prompt_span_id, trace_id=trace_id,
-                            metadata={"prompt_length": len(prompt)})
+                            output={"prompt_length": len(prompt),
+                                    "has_memory": bool(shared_memory)})
 
         # Get worktree workspace if not provided
         if workspace is None:
@@ -251,6 +254,7 @@ class SlackAgentHandler:
         # LLM call span
         llm_span_id = tracer.start_span(
             "llm.call", trace_id=trace_id, parent_id=parent_span_id,
+            input={"question": question[:500]},
         ) if trace_id else None
 
         response, new_session_id = self._provider.call(
@@ -335,10 +339,12 @@ class SlackAgentHandler:
                 input=question,
                 metadata={"user": user_name, "channel": channel},
             )
-            tracer.end_span(receive_span, trace_id=trace_id)
+            tracer.end_span(receive_span, trace_id=trace_id,
+                            output={"cleaned_text": question[:200]})
 
             # Semantic Router — decide agent + model + memory (with Slack thread context)
-            router_span = tracer.start_span("router.classify", trace_id=trace_id)
+            router_span = tracer.start_span("router.classify", trace_id=trace_id,
+                                               input={"question": question[:300]})
             route = self._router.route(
                 question, thread_context=context,
                 trace_id=trace_id, parent_span_id=router_span,
@@ -391,7 +397,9 @@ class SlackAgentHandler:
 
             # Fix #6: Memory observe — pass observe_span_id to background
             # thread which will close it when the work finishes.
-            observe_span = tracer.start_span("memory.observe", trace_id=trace_id)
+            observe_span = tracer.start_span("memory.observe", trace_id=trace_id,
+                                                input={"question": question[:200],
+                                                       "reply": reply[:200]})
             self._memory_agent.observe(
                 config.name, question, reply,
                 trace_id=trace_id,
@@ -506,10 +514,11 @@ class SlackAgentHandler:
             reply_span = None
             if tracer and trace_id:
                 reply_span = tracer.start_span("slack.reply", trace_id=trace_id,
-                                               metadata={"length": len(reply)})
+                                               input={"reply_length": len(reply)})
             say(reply, thread_ts=thread_ts)
             if tracer and trace_id and reply_span:
-                tracer.end_span(reply_span, trace_id=trace_id)
+                tracer.end_span(reply_span, trace_id=trace_id,
+                                output={"status": "sent"})
 
     def _handle_message(self, event: dict[str, Any], say: Any, client: WebClient) -> None:
         text = event.get("text", "").strip()

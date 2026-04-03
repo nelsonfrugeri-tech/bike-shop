@@ -83,6 +83,17 @@ def _post(path: str, body: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _ensure_json_object(value: Any) -> dict[str, Any] | list[Any]:
+    """Ensure value is a JSON object (dict/list), not a plain string.
+
+    Langfuse REST API expects input/output as JSON objects.
+    Plain strings are silently dropped, resulting in null.
+    """
+    if isinstance(value, (dict, list)):
+        return value
+    return {"value": value}
+
+
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -211,7 +222,7 @@ class Tracer:
                 "name": name,
                 "userId": user_id or self._agent_name,
                 "sessionId": session_id,
-                "input": input,
+                "input": _ensure_json_object(input) if input is not None else None,
                 "metadata": metadata or {},
                 "tags": tags or [],
             },
@@ -233,7 +244,7 @@ class Tracer:
 
         body: dict[str, Any] = {"id": trace_id}
         if output is not None:
-            body["output"] = output
+            body["output"] = _ensure_json_object(output)
         if metadata is not None:
             body["metadata"] = metadata
         if tags is not None:
@@ -272,7 +283,7 @@ class Tracer:
         if parent_id:
             body["parentObservationId"] = parent_id
         if input is not None:
-            body["input"] = input if isinstance(input, str) else json.dumps(input)
+            body["input"] = _ensure_json_object(input)
 
         _buffer.add({
             "id": _uuid(),
@@ -303,7 +314,7 @@ class Tracer:
             "endTime": now,
         }
         if output is not None:
-            body["output"] = output if isinstance(output, str) else json.dumps(output)
+            body["output"] = _ensure_json_object(output)
         if metadata:
             body["metadata"] = metadata
         if level:
@@ -344,7 +355,7 @@ class Tracer:
         if parent_id:
             body["parentObservationId"] = parent_id
         if input is not None:
-            body["input"] = input if isinstance(input, str) else json.dumps(input)
+            body["input"] = _ensure_json_object(input)
 
         _buffer.add({
             "id": _uuid(),
@@ -376,7 +387,7 @@ class Tracer:
             "completionStartTime": now,
         }
         if output is not None:
-            body["output"] = output if isinstance(output, str) else json.dumps(output)
+            body["output"] = _ensure_json_object(output)
         if usage:
             body["usage"] = usage
         if metadata:
