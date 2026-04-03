@@ -160,19 +160,20 @@ class TestGracefulKill:
     """Verify SIGTERM is sent before SIGKILL."""
 
     def test_sigterm_received(self, tmp_path: object) -> None:
-        """Process that traps SIGTERM and exits cleanly."""
-        cmd = _python("""\
-            import signal, sys, time
+        """Process that traps SIGTERM writes a marker file; verify the file exists."""
+        marker = tmp_path / "sigterm_received"
+        cmd = _python(f"""\
+            import signal, sys, time, pathlib
 
             def handler(sig, frame):
-                print("GOT_SIGTERM", flush=True)
+                pathlib.Path("{marker}").write_text("yes")
                 sys.exit(0)
 
             signal.signal(signal.SIGTERM, handler)
             print("start", flush=True)
             time.sleep(60)
         """)
-        try:
+        with pytest.raises(_IdleTimeoutError):
             _run_with_idle_watchdog(
                 cmd,
                 idle_timeout=IDLE,
@@ -182,7 +183,22 @@ class TestGracefulKill:
                 env=os.environ.copy(),
                 agent_name="test",
             )
-        except _IdleTimeoutError:
-            pass  # expected
-        # The fact that it completed without hanging proves SIGTERM was sent
-        # and the process exited within grace period.
+        assert marker.exists(), "SIGTERM handler was never called"
+        assert marker.read_text() == "yes"
+
+
+class TestProcessCrash:
+    """Process that crashes immediately should return without timeout."""
+
+    def test_crash_returns_nonzero(self, tmp_path: object) -> None:
+        cmd = _python("raise SystemExit(42)")
+        result = _run_with_idle_watchdog(
+            cmd,
+            idle_timeout=IDLE,
+            max_timeout=MAX,
+            grace_period=GRACE,
+            cwd=str(tmp_path),
+            env=os.environ.copy(),
+            agent_name="test",
+        )
+        assert result.returncode == 42

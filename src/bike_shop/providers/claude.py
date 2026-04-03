@@ -258,7 +258,6 @@ def _graceful_kill(proc: subprocess.Popen, grace_period: int = 5) -> None:
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        proc.kill()
         proc.wait()
         logger.warning("[claude] Process force-killed after SIGKILL")
 
@@ -297,30 +296,53 @@ def _run_with_idle_watchdog(
     )
 
     stdout_lines: list[str] = []
-    last_activity = time.time()
-    start_time = time.time()
+    last_activity = time.monotonic()
+    start_time = time.monotonic()
     stop_event = threading.Event()
     kill_reason: str | None = None
 
+    stderr_lines: list[str] = []
+
     def _reader() -> None:
-        """Read stdout line by line, update last_activity timestamp."""
+        """Read stdout line by line, update last_activity timestamp.
+
+        Note: iteration is line-buffered. If the process emits partial
+        lines without trailing newline, last_activity won't update
+        until the line completes or the pipe closes.
+        """
         nonlocal last_activity
         assert proc.stdout is not None
         try:
             for line in proc.stdout:
                 stdout_lines.append(line)
-                last_activity = time.time()
+                last_activity = time.monotonic()
                 if stop_event.is_set():
                     break
         except ValueError:
             # stdout closed
             pass
 
+    def _stderr_reader() -> None:
+        """Read stderr line by line into stderr_lines.
+
+        stderr activity does NOT update last_activity — only stdout
+        matters for idle detection.
+        """
+        assert proc.stderr is not None
+        try:
+            for line in proc.stderr:
+                stderr_lines.append(line)
+                if stop_event.is_set():
+                    break
+        except ValueError:
+            # stderr closed
+            pass
+
     def _watchdog() -> None:
         """Check idle time and absolute timeout periodically."""
         nonlocal kill_reason
         while not stop_event.wait(timeout=1.0):
-            now = time.time()
+            now = time.monotonic()
             idle_elapsed = now - last_activity
             total_elapsed = now - start_time
 
@@ -345,17 +367,20 @@ def _run_with_idle_watchdog(
                 return
 
     reader_thread = threading.Thread(target=_reader, daemon=True)
+    stderr_reader_thread = threading.Thread(target=_stderr_reader, daemon=True)
     watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
 
     reader_thread.start()
+    stderr_reader_thread.start()
     watchdog_thread.start()
 
     proc.wait()
     stop_event.set()
     reader_thread.join(timeout=5)
+    stderr_reader_thread.join(timeout=5)
     watchdog_thread.join(timeout=5)
 
-    stderr = proc.stderr.read() if proc.stderr else ""
+    stderr = "".join(stderr_lines)
     stdout = "".join(stdout_lines)
 
     if kill_reason == "idle":
