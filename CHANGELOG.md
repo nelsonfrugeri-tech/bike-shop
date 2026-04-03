@@ -8,10 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Git worktree isolation** (`worktree.py`) — each agent works in an isolated git worktree under `{AGENT_WORKSPACE}/.worktrees/`, preventing PR cross-contamination between agents
+- **Mandatory worktree isolation** (`worktree.py`) — each agent works in an isolated git worktree under `AGENT_WORKTREE_DIR`, preventing PR cross-contamination between agents
   - `ensure_worktree(agent_key, task_id)` — creates or reuses a worktree
   - `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `cleanup_stale_worktrees()`
   - Claude CLI subprocess now runs in the agent's worktree (`cwd=workspace`)
+  - **No fallback** — provider and handler raise on missing worktree instead of falling back to shared workspace
+  - **Startup enforcement** — validates `AGENT_WORKSPACE` and `AGENT_WORKTREE_DIR` before starting any agent
+  - **`--cleanup-worktrees`** CLI command — removes stale worktrees older than N days (default: 7)
 - **Message batching** (`accumulator.py`) — buffers rapid-fire Slack messages within a configurable window (default 3s) and flushes as a single batch
   - Single message: standard flow (router → LLM → reply)
   - Multiple messages: consolidated prompt with parallel execution instructions

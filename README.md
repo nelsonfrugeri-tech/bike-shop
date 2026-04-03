@@ -565,7 +565,8 @@ See [MANIFEST.md](MANIFEST.md) for the full process definition.
 | `{AGENT}_GITHUB_INSTALLATION_ID` | | GitHub App installation ID |
 | `PROJECT_LEAD_NAME` | | Project lead's display name (default: "the project lead") |
 | `PROJECT_LEAD_SLACK_ID` | | Project lead's Slack user ID for @mentions |
-| `AGENT_WORKSPACE` | | Main repo directory — worktrees are created in `{AGENT_WORKSPACE}/.worktrees/` |
+| `AGENT_WORKSPACE` | ✅ | Main repo directory (read-only reference for git commands) |
+| `AGENT_WORKTREE_DIR` | ✅ | Directory where agent worktrees are created (separate from main repo) |
 | `MSG_BUFFER_WINDOW` | | Seconds to buffer rapid-fire messages (default: `3.0`) |
 | `MAX_BATCH_SIZE` | | Max messages per batch before immediate flush (default: `10`) |
 | `CLAUDE_TIMEOUT_SMALL` | | Timeout for small prompts <8k tokens (default: `180`s) |

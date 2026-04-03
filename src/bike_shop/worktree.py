@@ -1,8 +1,15 @@
 """Git worktree management — isolated workspaces per agent/task.
 
-Worktrees live in {AGENT_WORKSPACE}/.worktrees/{name}/.
+Worktrees live in {AGENT_WORKTREE_DIR}/{name}/.
 Each worktree is a full git checkout on its own branch, sharing
 the same .git directory as the main repo.
+
+Environment variables:
+    AGENT_WORKSPACE: Path to the main git repository (read-only reference).
+                     Must exist and be a valid git repo. Mandatory.
+    AGENT_WORKTREE_DIR: Directory where worktrees are created. Separate from
+                        AGENT_WORKSPACE so worktrees can live outside the main
+                        repo. Mandatory.
 """
 
 from __future__ import annotations
@@ -16,23 +23,41 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-WORKTREES_DIR = ".worktrees"
-
-
 def _workspace_root() -> str:
-    """Get AGENT_WORKSPACE or raise."""
+    """Get AGENT_WORKSPACE or raise.
+
+    AGENT_WORKSPACE must point to the main git repository.
+    It is used as the cwd for git commands but never written to directly.
+    """
     ws = os.environ.get("AGENT_WORKSPACE")
     if not ws:
         raise RuntimeError(
             "AGENT_WORKSPACE not set — cannot create worktrees. "
             "Set AGENT_WORKSPACE to the main repo path."
         )
+    if not os.path.isdir(ws):
+        raise RuntimeError(
+            f"AGENT_WORKSPACE directory does not exist: {ws}"
+        )
     return ws
 
 
 def _worktrees_base() -> str:
-    """Return the base directory for all worktrees."""
-    return os.path.join(_workspace_root(), WORKTREES_DIR)
+    """Return the base directory for all worktrees (AGENT_WORKTREE_DIR).
+
+    This directory is separate from AGENT_WORKSPACE so worktrees can live
+    outside the main repository tree.
+
+    Raises:
+        RuntimeError: If AGENT_WORKTREE_DIR is not set.
+    """
+    wt_dir = os.environ.get("AGENT_WORKTREE_DIR")
+    if not wt_dir:
+        raise RuntimeError(
+            "AGENT_WORKTREE_DIR not set — cannot create worktrees. "
+            "Set AGENT_WORKTREE_DIR to the directory where worktrees should live."
+        )
+    return wt_dir
 
 
 def create_worktree(

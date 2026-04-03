@@ -186,14 +186,14 @@ class SlackAgentHandler:
         # Stash say/client per thread for batch callback
         self._thread_context: dict[str, dict[str, Any]] = {}
 
-    def _get_workspace(self, task_id: str | None = None) -> str | None:
-        """Get or create an isolated worktree for this agent."""
-        try:
-            return ensure_worktree(self._config.agent_key, task_id=task_id)
-        except RuntimeError as e:
-            logger.warning("[%s] Worktree creation failed: %s — using default workspace",
-                          self._config.name, e)
-            return None
+    def _get_workspace(self, task_id: str | None = None) -> str:
+        """Get or create an isolated worktree for this agent.
+
+        Raises:
+            RuntimeError: If worktree creation fails. Worktrees are mandatory;
+                          there is no fallback to a shared directory.
+        """
+        return ensure_worktree(self._config.agent_key, task_id=task_id)
 
     def _call_llm(self, context: str, question: str, thread_ts: str,
                   model_override: str | None = None, agent_override: str | None = None,

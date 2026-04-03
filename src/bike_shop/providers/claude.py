@@ -91,10 +91,17 @@ class ClaudeProvider(LLMProvider):
                      config.name, model_id, timeout, len(prompt))
         start_time = time.time()
 
+        if not workspace:
+            raise RuntimeError(
+                "workspace must be set to an isolated worktree path. "
+                "Ensure AGENT_WORKTREE_DIR is configured and ensure_worktree() "
+                "was called before invoking the provider."
+            )
+
         try:
             result = self._run_with_graceful_timeout(
                 cmd, timeout=timeout,
-                cwd=workspace or os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
+                cwd=workspace,
                 env=env,
             )
             duration_ms = (time.time() - start_time) * 1000
