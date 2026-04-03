@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+- `memory-keeper` MCP server — replaced by Mem0 (Qdrant + Ollama) since v0.2.0
+
 ### Fixed
 - **Langfuse spans input/output null** — Langfuse REST API expects JSON objects, not plain strings
   - Added `_ensure_json_object()` helper that wraps strings/scalars as `{"value": ...}`
