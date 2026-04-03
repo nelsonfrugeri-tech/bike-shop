@@ -350,7 +350,7 @@ bike-shop/
 │       └── handler.py           # SlackAgentHandler (orchestrates the full flow)
 ├── assets/team/                 # Agent avatars
 ├── docker-compose.yml           # Langfuse + Postgres + Qdrant + Ollama
-├── mcp.json                     # MCP servers (Notion, draw.io, Excalidraw, memory-keeper)
+├── mcp.json                     # MCP servers (Notion, draw.io, Excalidraw)
 ├── MANIFEST.md                  # Team process definition
 ├── CHANGELOG.md                 # Release history
 ├── pyproject.toml               # Dependencies and build config
