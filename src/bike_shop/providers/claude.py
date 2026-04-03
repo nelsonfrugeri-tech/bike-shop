@@ -235,7 +235,6 @@ class ClaudeProvider(LLMProvider):
                 trace_id=trace_id,
                 parent_span_id=parent_span_id,
                 workspace=workspace,
-                timeout=timeout,
                 prompt=prompt,
             )
         else:
@@ -337,7 +336,6 @@ class ClaudeProvider(LLMProvider):
         trace_id: str | None = None,
         parent_span_id: str | None = None,
         workspace: str,
-        timeout: int,
         prompt: str,
     ) -> tuple[str, str | None]:
         """Streaming mode with Popen — creates spans in real-time."""
