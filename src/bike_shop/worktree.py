@@ -140,18 +140,29 @@ def remove_worktree(name: str) -> bool:
         return False
 
     try:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", wt_path],
+        # Try without --force first to protect uncommitted work
+        result = subprocess.run(
+            ["git", "worktree", "remove", wt_path],
             cwd=ws,
             capture_output=True,
             text=True,
             timeout=15,
         )
+        if result.returncode != 0:
+            # Fallback to --force only if clean remove fails
+            logger.warning("[worktree] Clean remove failed, forcing: %s", wt_path)
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", wt_path],
+                cwd=ws,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
         logger.info("[worktree] Removed: %s", wt_path)
         return True
     except Exception as e:
         logger.warning("[worktree] Failed to remove %s: %s", wt_path, e)
-        # Fallback: just delete the directory
+        # Last resort: delete directory and prune
         try:
             shutil.rmtree(wt_path)
             subprocess.run(["git", "worktree", "prune"], cwd=ws, capture_output=True, timeout=10)

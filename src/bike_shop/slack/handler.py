@@ -185,6 +185,7 @@ class SlackAgentHandler:
 
         # Stash say/client per thread for batch callback
         self._thread_context: dict[str, dict[str, Any]] = {}
+        self._thread_context_lock = threading.Lock()
 
     def _get_workspace(self, task_id: str | None = None) -> str:
         """Get or create an isolated worktree for this agent.
@@ -338,7 +339,8 @@ class SlackAgentHandler:
         _, thread_ts = parts
 
         # Retrieve stashed context
-        ctx = self._thread_context.pop(key, None)
+        with self._thread_context_lock:
+            ctx = self._thread_context.pop(key, None)
         if not ctx:
             logger.warning("[%s] No context for batch key %s", self._config.name, key)
             return
@@ -464,11 +466,12 @@ class SlackAgentHandler:
 
         # Stash context for batch callback and add to accumulator
         acc_key = f"{self._config.agent_key}:{thread_ts}"
-        self._thread_context[acc_key] = {
-            "say": say,
-            "client": client,
-            "channel": channel,
-        }
+        with self._thread_context_lock:
+            self._thread_context[acc_key] = {
+                "say": say,
+                "client": client,
+                "channel": channel,
+            }
 
         self._accumulator.add(
             self._config.agent_key,
