@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bike_shop.observability import Tracer, _BatchBuffer, _now_iso, _uuid
+from bike_shop.observability import Tracer, _BatchBuffer, _ensure_json_object, _now_iso, _uuid
 
 
 # ---------------------------------------------------------------------------
@@ -22,6 +22,20 @@ class TestHelpers:
         ts = _now_iso()
         assert ts.endswith("Z")
         assert "T" in ts
+
+    def test_ensure_json_object_wraps_string(self) -> None:
+        assert _ensure_json_object("hello") == {"value": "hello"}
+
+    def test_ensure_json_object_passes_dict(self) -> None:
+        d = {"key": "val"}
+        assert _ensure_json_object(d) is d
+
+    def test_ensure_json_object_passes_list(self) -> None:
+        lst = [1, 2, 3]
+        assert _ensure_json_object(lst) is lst
+
+    def test_ensure_json_object_wraps_int(self) -> None:
+        assert _ensure_json_object(42) == {"value": 42}
 
     def test_uuid_is_unique(self) -> None:
         a = _uuid()
@@ -139,7 +153,7 @@ class TestTracerEnabled:
         event = mock_buffer.add.call_args[0][0]
         assert event["type"] == "trace-create"
         assert event["body"]["name"] == "my-trace"
-        assert event["body"]["input"] == "hello"
+        assert event["body"]["input"] == {"value": "hello"}
 
     @patch("bike_shop.observability._buffer")
     @patch("bike_shop.observability._get_config", return_value=("http://localhost:3000", "Basic abc"))
@@ -157,7 +171,7 @@ class TestTracerEnabled:
         assert create_event["type"] == "span-create"
         assert create_event["body"]["parentObservationId"] == "parent-1"
         assert update_event["type"] == "span-update"
-        assert update_event["body"]["output"] == "done"
+        assert update_event["body"]["output"] == {"value": "done"}
 
     @patch("bike_shop.observability._buffer")
     @patch("bike_shop.observability._get_config", return_value=("http://localhost:3000", "Basic abc"))
@@ -180,7 +194,9 @@ class TestTracerEnabled:
 
         assert create_event["type"] == "generation-create"
         assert create_event["body"]["model"] == "claude-sonnet"
+        assert create_event["body"]["input"] == {"value": "prompt"}
         assert update_event["type"] == "generation-update"
+        assert update_event["body"]["output"] == {"value": "response"}
         assert update_event["body"]["usage"] == {"input": 100, "output": 50}
 
 
