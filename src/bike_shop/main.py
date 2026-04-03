@@ -9,6 +9,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from bike_shop.config import AGENT_REGISTRY, load_config
 from bike_shop.handlers import create_handler
+from bike_shop.worktree import cleanup_stale_worktrees, ensure_worktree
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -77,12 +78,64 @@ def _status() -> None:
             print(f"  {name}: stopped")
 
 
+def _validate_worktree_infra(agent_name: str) -> None:
+    """Validate that worktree infrastructure is ready for the given agent.
+
+    Checks:
+    - AGENT_WORKSPACE is set and the directory exists.
+    - AGENT_WORKTREE_DIR is set and can be created.
+    - A worktree for the agent can be provisioned.
+
+    Raises:
+        SystemExit: If any validation fails, with a clear error message.
+    """
+    ws = os.environ.get("AGENT_WORKSPACE")
+    if not ws:
+        logger.error(
+            "AGENT_WORKSPACE is not set. "
+            "Set it to the main git repository path before starting agents."
+        )
+        sys.exit(1)
+    if not os.path.isdir(ws):
+        logger.error(
+            "AGENT_WORKSPACE directory does not exist: %s. "
+            "Create the directory or update the env var.",
+            ws,
+        )
+        sys.exit(1)
+
+    wt_dir = os.environ.get("AGENT_WORKTREE_DIR")
+    if not wt_dir:
+        logger.error(
+            "AGENT_WORKTREE_DIR is not set. "
+            "Set it to the directory where agent worktrees should be created."
+        )
+        sys.exit(1)
+
+    try:
+        os.makedirs(wt_dir, exist_ok=True)
+    except OSError as e:
+        logger.error(
+            "Cannot create AGENT_WORKTREE_DIR %s: %s", wt_dir, e
+        )
+        sys.exit(1)
+
+    try:
+        wt_path = ensure_worktree(agent_name)
+        logger.info("Agent %s worktree ready at %s", agent_name, wt_path)
+    except RuntimeError as e:
+        logger.error("Worktree provisioning failed for agent %s: %s", agent_name, e)
+        sys.exit(1)
+
+
 def _connect_agent(agent_name: str) -> tuple[str, SocketModeHandler]:
     """Connect a single agent and return (name, handler). Does NOT block."""
     existing = _is_running(agent_name)
     if existing:
         logger.error("%s is already running (PID %d). Use --stop first.", agent_name, existing)
         sys.exit(1)
+
+    _validate_worktree_infra(agent_name)
 
     config = load_config(agent_name)
     logger.info("Starting %s (%s) [%s]...", config.name, config.role, config.bot_user_id)
@@ -173,7 +226,20 @@ def main() -> None:
         action="store_true",
         help="Show status of all agents",
     )
+    parser.add_argument(
+        "--cleanup-worktrees",
+        metavar="DAYS",
+        type=int,
+        nargs="?",
+        const=7,
+        help="Remove worktrees older than DAYS days (default: 7)",
+    )
     args = parser.parse_args()
+
+    if args.cleanup_worktrees is not None:
+        removed = cleanup_stale_worktrees(max_age_days=args.cleanup_worktrees)
+        print(f"Removed {removed} stale worktree(s) older than {args.cleanup_worktrees} day(s).")
+        return
 
     if args.status:
         _status()

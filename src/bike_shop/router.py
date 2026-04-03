@@ -180,6 +180,10 @@ class SemanticRouter:
                 capture_output=True,
                 text=True,
                 timeout=120,
+                # The router only classifies messages — it never writes files.
+                # Using AGENT_WORKSPACE directly (the main repo) is safe here
+                # because no uncommitted changes are introduced by routing.
+                # Agent handlers use isolated worktrees for all write operations.
                 cwd=os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
             )
 

@@ -22,6 +22,7 @@ class LLMProvider(ABC):
         mcp_config: str | None = None,
         github_token: str | None = None,
         router_meta: dict | None = None,
+        workspace: str | None = None,
     ) -> tuple[str, str | None]:
         """Send prompt to the LLM. Returns (response_text, session_id)."""
         ...
