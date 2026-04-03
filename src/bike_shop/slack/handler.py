@@ -17,6 +17,7 @@ from bike_shop.config import AgentConfig
 from bike_shop.github_auth import GitHubAuth
 from bike_shop.memory_agent import MemoryAgent
 from bike_shop.model_switch import ModelSwitcher
+from bike_shop.observability import Tracer
 from bike_shop.providers import LLMProvider
 from bike_shop.router import SemanticRouter
 from bike_shop.session import SessionStore
@@ -55,7 +56,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 _BASE_MCP_CONFIG = os.path.join(_PROJECT_ROOT, "mcp.json")
 
 
-def _resolve_env_vars(obj):
+def _resolve_env_vars(obj: Any) -> Any:
     """Recursively resolve ${VAR} placeholders in dicts/lists/strings."""
     if isinstance(obj, str) and obj.startswith("${") and obj.endswith("}"):
         return os.environ.get(obj[2:-1], "")
@@ -151,13 +152,13 @@ def _build_batch_prompt(config: AgentConfig, context: str,
     parts.append(
         "You received multiple messages in quick succession. Analyze them:\n\n"
         "1. **Independent tasks** (no shared files, no dependency between outputs):\n"
-        "   → Use the Agent tool to spawn one sub-agent per task in isolated worktrees\n"
-        "   → Each sub-agent runs in parallel with isolation: \"worktree\"\n"
-        "   → Collect results and respond with a consolidated summary\n\n"
+        "   -> Use the Agent tool to spawn one sub-agent per task in isolated worktrees\n"
+        "   -> Each sub-agent runs in parallel with isolation: \"worktree\"\n"
+        "   -> Collect results and respond with a consolidated summary\n\n"
         "2. **Dependent tasks** (task B needs output of task A):\n"
-        "   → Execute sequentially, in dependency order\n\n"
+        "   -> Execute sequentially, in dependency order\n\n"
         "3. **Related tasks** (all part of the same feature):\n"
-        "   → Execute together in a single worktree\n\n"
+        "   -> Execute together in a single worktree\n\n"
         "Messages:\n"
     )
     for i, msg in enumerate(messages, 1):
@@ -181,6 +182,7 @@ class SlackAgentHandler:
         self._switcher = ModelSwitcher()
         self._router = SemanticRouter()
         self._memory_agent = MemoryAgent(agent_key=config.agent_key)
+        self._tracer = Tracer(config.name)
         self._accumulator = MessageAccumulator(flush_callback=self._on_batch_flush)
 
         # Stash say/client per thread for batch callback
@@ -200,24 +202,56 @@ class SlackAgentHandler:
                   model_override: str | None = None, agent_override: str | None = None,
                   router_meta: dict | None = None,
                   channel: str = "",
-                  memory_requests: list | None = None,
-                  workspace: str | None = None) -> str:
+                  memory_requests: list[Any] | None = None,
+                  workspace: str | None = None,
+                  trace_id: str | None = None,
+                  parent_span_id: str | None = None) -> str:
         """Call the LLM provider and handle session tracking."""
         config = self._config
+        tracer = self._tracer
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
 
         # Memory recall: full recall on new threads + router-driven filtered recall
-        shared_memory = self._memory_agent.recall(question, has_session=session_id is not None)
+        memory_span_id = tracer.start_span(
+            "memory.recall", trace_id=trace_id, parent_id=parent_span_id,
+        ) if trace_id else None
+
+        shared_memory = self._memory_agent.recall(
+            question, has_session=session_id is not None,
+            trace_id=trace_id, parent_span_id=memory_span_id,
+        )
         if memory_requests:
-            filtered = self._memory_agent.recall_filtered(memory_requests)
+            filtered = self._memory_agent.recall_filtered(
+                memory_requests,
+                trace_id=trace_id, parent_span_id=memory_span_id,
+            )
             shared_memory = (shared_memory + filtered) if shared_memory else filtered
+
+        if memory_span_id and trace_id:
+            tracer.end_span(memory_span_id, trace_id=trace_id,
+                            output=f"{len(shared_memory)} chars" if shared_memory else "empty")
+
+        # Build prompt
+        prompt_span_id = tracer.start_span(
+            "prompt.build", trace_id=trace_id, parent_id=parent_span_id,
+        ) if trace_id else None
+
         prompt = _build_prompt(config, context, question, github_token, shared_memory)
+
+        if prompt_span_id and trace_id:
+            tracer.end_span(prompt_span_id, trace_id=trace_id,
+                            metadata={"prompt_length": len(prompt)})
 
         # Get worktree workspace if not provided
         if workspace is None:
             workspace = self._get_workspace()
+
+        # LLM call span
+        llm_span_id = tracer.start_span(
+            "llm.call", trace_id=trace_id, parent_id=parent_span_id,
+        ) if trace_id else None
 
         response, new_session_id = self._provider.call(
             config,
@@ -231,7 +265,13 @@ class SlackAgentHandler:
             github_token=github_token,
             router_meta=router_meta,
             workspace=workspace,
+            trace_id=trace_id,
+            parent_span_id=llm_span_id,
         )
+
+        if llm_span_id and trace_id:
+            tracer.end_span(llm_span_id, trace_id=trace_id,
+                            output=response[:200] if response else "")
 
         if new_session_id and thread_ts:
             self._session.store(thread_ts, new_session_id)
@@ -239,7 +279,8 @@ class SlackAgentHandler:
         return response
 
     def _call_llm_batch(self, context: str, messages: list[dict[str, Any]],
-                        thread_ts: str, workspace: str | None = None) -> str:
+                        thread_ts: str, workspace: str | None = None,
+                        trace_id: str | None = None) -> str:
         """Call LLM with a batch of messages."""
         config = self._config
         mcp_config = _build_mcp_config(config)
@@ -265,6 +306,7 @@ class SlackAgentHandler:
             mcp_config=mcp_config,
             github_token=github_token,
             workspace=workspace,
+            trace_id=trace_id,
         )
 
         if new_session_id and thread_ts:
@@ -272,19 +314,43 @@ class SlackAgentHandler:
 
         return response
 
-    def _process_and_reply(self, say, client: WebClient,
+    def _process_and_reply(self, say: Any, client: WebClient,
                            context: str, question: str, thread_ts: str,
                            channel: str = "", user_name: str = "") -> None:
         """Process single message LLM call in background thread and reply when done."""
         config = self._config
+        tracer = self._tracer
         try:
+            # Start top-level trace for this message
+            trace_id = tracer.start_trace(
+                f"{config.name}/slack-message",
+                input=question,
+                session_id=thread_ts,
+                metadata={"channel": channel, "user": user_name},
+            )
+
+            # message.receive span
+            receive_span = tracer.start_span(
+                "message.receive", trace_id=trace_id,
+                input=question,
+                metadata={"user": user_name, "channel": channel},
+            )
+            tracer.end_span(receive_span, trace_id=trace_id)
+
             # Semantic Router — decide agent + model + memory (with Slack thread context)
-            route = self._router.route(question, thread_context=context)
+            router_span = tracer.start_span("router.classify", trace_id=trace_id)
+            route = self._router.route(
+                question, thread_context=context,
+                trace_id=trace_id, parent_span_id=router_span,
+            )
             agent_override = route.get("agent")
             model_override = route.get("model")
             router_model_name = route.get("model_name", "sonnet")
             router_reason = route.get("reason", "")
             memory_requests = route.get("memory", [])
+            tracer.end_span(router_span, trace_id=trace_id,
+                            output=json.dumps({"agent": agent_override, "model": router_model_name}),
+                            metadata={"reason": router_reason})
 
             logger.info("[%s] Router: agent=%s model=%s memory_lookups=%d reason=%s",
                         config.name, agent_override or "direct",
@@ -295,7 +361,7 @@ class SlackAgentHandler:
             if force_opus:
                 model_override = config.opus_model_id
                 router_model_name = "opus (manual override)"
-                logger.info("[%s] Project lead override → Opus", config.name)
+                logger.info("[%s] Project lead override -> Opus", config.name)
 
             reply = self._call_llm(context, question, thread_ts,
                                    model_override=model_override,
@@ -304,31 +370,45 @@ class SlackAgentHandler:
                                                 "reason": router_reason,
                                                 "agent": agent_override},
                                    channel=channel,
-                                   memory_requests=memory_requests)
+                                   memory_requests=memory_requests,
+                                   trace_id=trace_id)
 
             if self._switcher.has_marker(reply):
                 if not self._switcher.should_escalate(thread_ts):
                     reply = self._switcher.strip_marker(reply)
-                    reply += f"\n\n⚠️ _Atingi o limite de escalações — preciso da sua decisão, {PROJECT_LEAD}._"
+                    reply += f"\n\n_Atingi o limite de escalacoes -- preciso da sua decisao, {PROJECT_LEAD}._"
                 else:
                     self._switcher.record_escalation(thread_ts)
                     say("_(pensando mais profundamente...)_", thread_ts=thread_ts)
 
                     reply = self._call_llm(context, question, thread_ts,
                                            model_override=config.opus_model_id,
-                                           channel=channel)
+                                           channel=channel,
+                                           trace_id=trace_id)
                     reply = self._switcher.strip_marker(reply)
 
             logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
 
-            # Memory Agent — observe the exchange for selective extraction (fire-and-forget)
-            self._memory_agent.observe(config.name, question, reply)
+            # Fix #6: Memory observe — pass observe_span_id to background
+            # thread which will close it when the work finishes.
+            observe_span = tracer.start_span("memory.observe", trace_id=trace_id)
+            self._memory_agent.observe(
+                config.name, question, reply,
+                trace_id=trace_id,
+                parent_span_id=observe_span,
+                observe_span_id=observe_span,
+            )
+            # observe_span is closed inside _observe_sync, not here
 
-            self._post_reply(say, reply, thread_ts)
+            self._post_reply(say, reply, thread_ts, tracer=tracer, trace_id=trace_id)
+
+            # Update trace and flush
+            tracer.update_trace(trace_id, output=reply[:500])
+            tracer.flush()
 
         except Exception as e:
             logger.error("[%s] Background processing error: %s", config.name, e)
-            say("(error processing — I saved my progress and will pick up next time)", thread_ts=thread_ts)
+            say("(error processing -- I saved my progress and will pick up next time)", thread_ts=thread_ts)
 
     def _on_batch_flush(self, key: str, messages: list[dict[str, Any]]) -> None:
         """Callback from accumulator — process a batch of messages."""
@@ -372,11 +452,12 @@ class SlackAgentHandler:
             )
             thread.start()
 
-    def _process_batch(self, say, client: WebClient,
+    def _process_batch(self, say: Any, client: WebClient,
                        messages: list[dict[str, Any]],
                        thread_ts: str, channel: str) -> None:
         """Process a batch of messages with a single consolidated LLM call."""
         config = self._config
+        tracer = self._tracer
         try:
             context = get_thread_context(client, channel, thread_ts)
             if not context:
@@ -384,9 +465,15 @@ class SlackAgentHandler:
 
             logger.info("[%s] Processing batch of %d messages", config.name, len(messages))
 
+            trace_id = tracer.start_trace(
+                f"{config.name}/slack-batch",
+                input=f"{len(messages)} messages",
+                session_id=thread_ts,
+            )
+
             say(f"_(Processing {len(messages)} tasks...)_", thread_ts=thread_ts)
 
-            reply = self._call_llm_batch(context, messages, thread_ts)
+            reply = self._call_llm_batch(context, messages, thread_ts, trace_id=trace_id)
 
             logger.info("[%s] Batch replied (%d chars): %s", config.name, len(reply), reply[:80])
 
@@ -394,15 +481,21 @@ class SlackAgentHandler:
             combined = " | ".join(m.get("text", "") for m in messages)
             self._memory_agent.observe(config.name, combined, reply)
 
-            self._post_reply(say, reply, thread_ts)
+            self._post_reply(say, reply, thread_ts, tracer=tracer, trace_id=trace_id)
+
+            tracer.update_trace(trace_id, output=reply[:500])
+            tracer.flush()
 
         except Exception as e:
             logger.error("[%s] Batch processing error: %s", config.name, e)
-            say("(error processing batch — I saved my progress and will pick up next time)", thread_ts=thread_ts)
+            say("(error processing batch -- I saved my progress and will pick up next time)", thread_ts=thread_ts)
 
-    def _post_reply(self, say, reply: str, thread_ts: str) -> None:
+    def _post_reply(self, say: Any, reply: str, thread_ts: str,
+                    tracer: Tracer | None = None,
+                    trace_id: str | None = None) -> None:
         """Post reply to Slack, handling suppression and mention formatting."""
-        # Strip markdown bold/italic wrapping mentions
+        # Strip markdown bold/italic wrapping mentions — Slack won't generate
+        # app_mention events if <@USER_ID> is inside **bold** or *italic*
         reply = re.sub(r'\*{1,2}(<@[A-Z0-9]+>)\*{1,2}', r'\1', reply)
 
         # Suppress empty/no-action responses
@@ -410,9 +503,15 @@ class SlackAgentHandler:
         if reply.strip().lower().rstrip(".!") in skip_phrases or len(reply.strip()) < 5:
             logger.info("[%s] Suppressed non-substantive response", self._config.name)
         else:
+            reply_span = None
+            if tracer and trace_id:
+                reply_span = tracer.start_span("slack.reply", trace_id=trace_id,
+                                               metadata={"length": len(reply)})
             say(reply, thread_ts=thread_ts)
+            if tracer and trace_id and reply_span:
+                tracer.end_span(reply_span, trace_id=trace_id)
 
-    def _handle_message(self, event: dict, say, client: WebClient) -> None:
+    def _handle_message(self, event: dict[str, Any], say: Any, client: WebClient) -> None:
         text = event.get("text", "").strip()
         if not text:
             return
@@ -443,7 +542,7 @@ class SlackAgentHandler:
             count = _agent_interactions.get(thread_ts, 0)
             if count >= MAX_AGENT_INTERACTIONS:
                 logger.warning(
-                    "[%s] Ignoring agent message — limit of %d agent interactions "
+                    "[%s] Ignoring agent message -- limit of %d agent interactions "
                     "reached in thread %s",
                     self._config.name, MAX_AGENT_INTERACTIONS, thread_ts,
                 )
@@ -479,7 +578,7 @@ class SlackAgentHandler:
             {"text": clean_text, "user_name": user_name, "channel": channel},
         )
 
-    def _handle_dm(self, event: dict, say, client: WebClient) -> None:
+    def _handle_dm(self, event: dict[str, Any], say: Any, client: WebClient) -> None:
         if event.get("subtype") or event.get("bot_id"):
             return
 
@@ -507,20 +606,20 @@ class SlackAgentHandler:
         app = App(token=self._config.bot_token)
 
         @app.event("app_mention")
-        def handle_mention(event, say, client):
+        def handle_mention(event: dict[str, Any], say: Any, client: WebClient) -> None:
             self._handle_message(event, say, client)
 
         @app.event({"type": "message", "subtype": "bot_message"})
-        def handle_bot_message(event, say, client):
+        def handle_bot_message(event: dict[str, Any], say: Any, client: WebClient) -> None:
             """Handle messages from other bots (agent-to-agent collaboration)."""
             self._handle_message(event, say, client)
 
         @app.event("message")
-        def handle_message(event, say, client):
+        def handle_message(event: dict[str, Any], say: Any, client: WebClient) -> None:
             if event.get("channel_type") == "im":
                 self._handle_dm(event, say, client)
                 return
             self._handle_message(event, say, client)
 
-        logger.info("[%s] Handler created — listening for @mentions and DMs", self._config.name)
+        logger.info("[%s] Handler created -- listening for @mentions and DMs", self._config.name)
         return SocketModeHandler(app, self._config.app_token)

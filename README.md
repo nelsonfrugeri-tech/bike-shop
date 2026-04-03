@@ -491,27 +491,37 @@ bike-shop --stop agent:mr-robot
 
 ### Langfuse Dashboard (localhost:3000)
 
-Every LLM call sends a full trace:
+Every Slack message produces a **hierarchical real-time trace** — spans are created as events stream from Claude CLI, not batched after completion:
 
 ```
-Trace: Mr. Robot/call/architect
-├── input: "let's design the notification system"
-├── output: agent response
-├── metadata:
-│   ├── selected_agent: architect
-│   ├── router_model: opus
-│   ├── router_reason: "system design requires deep thinking"
-│   ├── duration_ms: 15230
-│   └── tool_count: 4
-│
-└── Generation: claude-cli
-    ├── tokens: 2500 → 800
-    ├── Span: thinking-1 (chain of thought)
-    ├── Span: tool/Bash (git checkout -b feat/notifications)
-    ├── Span: tool/Write (src/notifications/handler.py)
-    ├── Span: tool/Bash (pytest tests/ -v)
-    └── Span: tool/Bash (git commit -m "feat: notification handler")
+Trace: "mr-robot/slack-message"
+├── Span: "message.receive"
+├── Span: "router.classify"
+│   └── Generation: "router.llm" (sonnet, with tokens)
+├── Span: "memory.recall"
+│   ├── Span: "mem0.search" scope=agent
+│   ├── Span: "mem0.search" scope=project
+│   └── Span: "mem0.search" scope=team
+├── Span: "prompt.build"
+├── Span: "llm.call"
+│   └── Generation: "claude-cli"
+│       ├── Span: "thinking.1"
+│       ├── Span: "tool.Bash" (with input/output)
+│       ├── Span: "tool.Write"
+│       └── Span: "thinking.2"
+├── Span: "memory.observe" (async)
+│   ├── Generation: "extraction.haiku"
+│   └── Span: "mem0.store"
+└── Span: "slack.reply"
 ```
+
+**Configuration:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LANGFUSE_FLUSH_INTERVAL_MS` | `500` | Micro-batch flush interval (ms) |
+| `LANGFUSE_TRACE_DETAIL` | `full` | `full` (all spans), `basic` (trace + generation only), `off` (disabled) |
+| `LANGFUSE_STREAM_ENABLED` | `true` | `true` = Popen streaming, `false` = subprocess.run batch |
 
 ### Sentinel Agent
 
@@ -575,6 +585,9 @@ See [MANIFEST.md](MANIFEST.md) for the full process definition.
 | `LANGFUSE_PUBLIC_KEY` | | Langfuse public key for tracing |
 | `LANGFUSE_SECRET_KEY` | | Langfuse secret key for tracing |
 | `LANGFUSE_HOST` | | Langfuse URL (default: `http://localhost:3000`) |
+| `LANGFUSE_FLUSH_INTERVAL_MS` | | Micro-batch flush interval in ms (default: `500`) |
+| `LANGFUSE_TRACE_DETAIL` | | Trace detail level: `full`, `basic`, or `off` (default: `full`) |
+| `LANGFUSE_STREAM_ENABLED` | | Enable streaming mode for real-time spans (default: `true`) |
 | `QDRANT_HOST` | | Qdrant host for Mem0 (default: `localhost`) |
 | `QDRANT_PORT` | | Qdrant port (default: `6333`) |
 | `OLLAMA_URL` | | Ollama URL for embeddings (default: `http://localhost:11434`) |

@@ -15,6 +15,7 @@ from typing import Any
 
 from bike_shop.extraction import extract_memories
 from bike_shop.mem0_client import get_mem0
+from bike_shop.observability import Tracer
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class MemoryAgent:
     def __init__(self, agent_key: str, project_id: str = "bike-shop") -> None:
         self._agent_key = agent_key
         self._project_id = project_id
+        self._tracer = Tracer(f"memory-{agent_key}")
 
         # Mem0 scoped user_ids
         self._uid_team = "team"
@@ -59,6 +61,8 @@ class MemoryAgent:
         query: str,
         *,
         has_session: bool = False,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
     ) -> str:
         """Full recall — all 3 scopes, only on new threads.
 
@@ -77,16 +81,23 @@ class MemoryAgent:
 
         sections: list[str] = []
         scopes = [
-            ("LONG-TERM — Agent memory", self._uid_agent, 5),
-            ("LONG-TERM — Project memory", self._uid_project, 5),
-            ("LONG-TERM — Team memory", self._uid_team, 3),
+            ("LONG-TERM — Agent memory", self._uid_agent, 5, "agent"),
+            ("LONG-TERM — Project memory", self._uid_project, 5, "project"),
+            ("LONG-TERM — Team memory", self._uid_team, 3, "team"),
         ]
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = {}
-            for label, uid, lim in scopes:
-                futures[pool.submit(mem0.search, query, user_id=uid, limit=lim)] = label
+            for label, uid, lim, scope_name in scopes:
+                futures[pool.submit(mem0.search, query, user_id=uid, limit=lim)] = (label, scope_name)
             for future in as_completed(futures):
-                label = futures[future]
+                label, scope_name = futures[future]
+                # Create a span for each mem0 search
+                search_span_id: str | None = None
+                if trace_id:
+                    search_span_id = self._tracer.start_span(
+                        "mem0.search", trace_id=trace_id, parent_id=parent_span_id,
+                        metadata={"scope": scope_name},
+                    )
                 try:
                     results = future.result(timeout=5)
                     memories = []
@@ -97,8 +108,18 @@ class MemoryAgent:
                                 memories.append(f"  - {text}")
                     if memories:
                         sections.append(f"{label}:\n" + "\n".join(memories))
+                    if search_span_id and trace_id:
+                        self._tracer.end_span(
+                            search_span_id, trace_id=trace_id,
+                            output=f"{len(memories)} memories",
+                        )
                 except Exception as e:
                     logger.warning("[memory-agent] Failed to recall %s: %s", label, e)
+                    if search_span_id and trace_id:
+                        self._tracer.end_span(
+                            search_span_id, trace_id=trace_id,
+                            output=str(e), level="ERROR",
+                        )
 
         if not sections:
             return ""
@@ -112,6 +133,9 @@ class MemoryAgent:
     def recall_filtered(
         self,
         memory_requests: list[dict[str, Any]],
+        *,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
     ) -> str:
         """Router-driven recall — searches Mem0 filtered by scope + type.
 
@@ -208,19 +232,36 @@ class MemoryAgent:
         agent_name: str,
         user_message: str,
         agent_response: str,
+        *,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        observe_span_id: str | None = None,
     ) -> None:
         """Fire-and-forget: extract memories in a background thread.
 
         The Slack response is already sent before this runs, so there's no
         user-facing latency. The extraction subprocess (Haiku ~2-5s) runs
         without blocking the handler's daemon thread.
+
+        When *observe_span_id* is provided, this method is responsible for
+        closing that span when the background work finishes, ensuring
+        sub-spans (extraction.haiku, mem0.store) end before the parent.
         """
         if not self._mem0_enabled:
+            # Close observe span immediately if nothing to do
+            if observe_span_id and trace_id:
+                self._tracer.end_span(observe_span_id, trace_id=trace_id,
+                                      output="mem0 disabled")
             return
 
         thread = threading.Thread(
             target=self._observe_sync,
             args=(agent_name, user_message, agent_response),
+            kwargs={
+                "trace_id": trace_id,
+                "parent_span_id": parent_span_id,
+                "observe_span_id": observe_span_id,
+            },
             daemon=True,
         )
         thread.start()
@@ -230,6 +271,10 @@ class MemoryAgent:
         agent_name: str,
         user_message: str,
         agent_response: str,
+        *,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+        observe_span_id: str | None = None,
     ) -> None:
         """Synchronous extraction + storage. Runs in background thread."""
         try:
@@ -237,9 +282,34 @@ class MemoryAgent:
             if not mem0:
                 return
 
+            # Extraction generation span
+            extraction_span: str | None = None
+            if trace_id:
+                extraction_span = self._tracer.start_generation(
+                    "extraction.haiku",
+                    trace_id=trace_id,
+                    model="claude-haiku-4-5-20251001",
+                    input=user_message[:300],
+                    parent_id=parent_span_id,
+                )
+
             memories = extract_memories(
                 agent_name, user_message, agent_response, self._project_id,
             )
+
+            if extraction_span and trace_id:
+                self._tracer.end_generation(
+                    extraction_span, trace_id=trace_id,
+                    output=f"{len(memories)} memories extracted",
+                )
+
+            # Store span
+            store_span: str | None = None
+            if trace_id and memories:
+                store_span = self._tracer.start_span(
+                    "mem0.store", trace_id=trace_id, parent_id=parent_span_id,
+                    metadata={"count": len(memories)},
+                )
 
             for m in memories:
                 uid = self._scope_to_user_id(m["scope"])
@@ -253,6 +323,12 @@ class MemoryAgent:
                     },
                 )
 
+            if store_span and trace_id:
+                self._tracer.end_span(
+                    store_span, trace_id=trace_id,
+                    output=f"{len(memories)} stored",
+                )
+
             if memories:
                 logger.debug(
                     "[memory-agent] Stored %d extracted memories from %s",
@@ -260,3 +336,12 @@ class MemoryAgent:
                 )
         except Exception as e:
             logger.warning("[memory-agent] Background extraction failed for %s: %s", agent_name, e)
+        finally:
+            # Close the parent observe span from the handler — must happen
+            # after all sub-spans (extraction.haiku, mem0.store) are closed.
+            if observe_span_id and trace_id:
+                self._tracer.end_span(
+                    observe_span_id, trace_id=trace_id,
+                    metadata={"async": True},
+                )
+                self._tracer.flush()

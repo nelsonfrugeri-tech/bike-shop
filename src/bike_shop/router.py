@@ -161,10 +161,28 @@ class SemanticRouter:
             types=types_description(),
         )
 
-    def route(self, message: str, thread_context: str = "") -> dict:
+    def route(
+        self,
+        message: str,
+        thread_context: str = "",
+        *,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
+    ) -> dict:
         """Classify a message. Returns {"agent": str|None, "model": str, "reason": str}."""
         start = time.time()
         prompt = self._build_prompt(self._experts, thread_context)
+
+        # Create a generation span for the router LLM call
+        gen_id: str | None = None
+        if trace_id:
+            gen_id = self._tracer.start_generation(
+                "router.llm",
+                trace_id=trace_id,
+                model=ROUTER_MODEL,
+                input=message[:300],
+                parent_id=parent_span_id,
+            )
 
         try:
             # Pass prompt via stdin to avoid CLI arg size limits and shell escaping
@@ -228,19 +246,28 @@ class SemanticRouter:
                 agent or "direct", model, len(memory), reason, duration_ms,
             )
 
-            # Trace to Langfuse
-            self._tracer.trace_call(
-                user_message=message[:300],
-                response=json.dumps({"agent": agent, "model": model, "reason": reason, "memory": memory}),
-                model=ROUTER_MODEL,
-                duration_ms=duration_ms,
-                input_tokens=None,
-                output_tokens=None,
-                tools=[],
-                tool_results=[],
-                thinking=[],
-                errors=[],
-            )
+            # End generation span if hierarchical tracing
+            if gen_id and trace_id:
+                self._tracer.end_generation(
+                    gen_id,
+                    trace_id=trace_id,
+                    output=json.dumps({"agent": agent, "model": model, "reason": reason}),
+                    metadata={"duration_ms": round(duration_ms)},
+                )
+            else:
+                # Backwards-compat: standalone trace for router calls without parent
+                self._tracer.trace_call(
+                    user_message=message[:300],
+                    response=json.dumps({"agent": agent, "model": model, "reason": reason, "memory": memory}),
+                    model=ROUTER_MODEL,
+                    duration_ms=duration_ms,
+                    input_tokens=None,
+                    output_tokens=None,
+                    tools=[],
+                    tool_results=[],
+                    thinking=[],
+                    errors=[],
+                )
 
             return {"agent": agent, "model": model_id, "model_name": model, "reason": reason, "memory": memory}
 
@@ -248,6 +275,12 @@ class SemanticRouter:
             duration_ms = (time.time() - start) * 1000
             logger.warning("[router] Failed to classify (%.0fms): %s — defaulting to sonnet", duration_ms, e)
 
-            self._tracer.trace_error(error=str(e), context=message[:300])
+            if gen_id and trace_id:
+                self._tracer.end_generation(
+                    gen_id, trace_id=trace_id,
+                    output=str(e), metadata={"error": True},
+                )
+            else:
+                self._tracer.trace_error(error=str(e), context=message[:300])
 
             return {"agent": None, "model": MODEL_MAP["sonnet"], "model_name": "sonnet", "reason": "router_fallback", "memory": []}

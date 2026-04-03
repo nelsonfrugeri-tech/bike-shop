@@ -8,20 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Mandatory worktree isolation** (`worktree.py`) — each agent works in an isolated git worktree under `AGENT_WORKTREE_DIR`, preventing PR cross-contamination between agents
-  - `ensure_worktree(agent_key, task_id)` — creates or reuses a worktree
-  - `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `cleanup_stale_worktrees()`
-  - Claude CLI subprocess now runs in the agent's worktree (`cwd=workspace`)
-  - **No fallback** — provider and handler raise on missing worktree instead of falling back to shared workspace
-  - **Startup enforcement** — validates `AGENT_WORKSPACE` and `AGENT_WORKTREE_DIR` before starting any agent
-  - **`--cleanup-worktrees`** CLI command — removes stale worktrees older than N days (default: 7)
-- **Message batching** (`accumulator.py`) — buffers rapid-fire Slack messages within a configurable window (default 3s) and flushes as a single batch
-  - Single message: standard flow (router → LLM → reply)
-  - Multiple messages: consolidated prompt with parallel execution instructions
-  - `MSG_BUFFER_WINDOW` and `MAX_BATCH_SIZE` env vars for tuning
-- **Batch prompt** with parallel execution instructions — when receiving multiple tasks, Claude analyzes dependencies and uses the Agent tool to spawn sub-agents in isolated worktrees
-- **Dynamic timeout** for Claude CLI — 3min (<8k tokens), 5min (8k-32k tokens), 10min (>32k tokens), based on prompt size
-- **Graceful process kill** on timeout — SIGTERM → 5s grace → SIGKILL with process group cleanup (prevents zombie servers like uvicorn)
+- **Hierarchical observability** — real-time tracing with nested spans via Langfuse REST API
+  - `Tracer` rewritten with `start_trace()`, `start_span()`, `end_span()`, `start_generation()`, `end_generation()` API
+  - Micro-batch flushing (configurable via `LANGFUSE_FLUSH_INTERVAL_MS`, default 500ms)
+  - Trace detail levels via `LANGFUSE_TRACE_DETAIL` (full/basic/off)
+  - Backwards-compatible `trace_call()` and `trace_error()` still work
+  - `atexit` flush ensures buffer drains on shutdown
+- **Streaming provider** — `subprocess.Popen` replaces `subprocess.run` for real-time span creation
+  - Tool, thinking, and error spans created as events stream from Claude CLI
+  - Fallback to batch mode via `LANGFUSE_STREAM_ENABLED=false` (read at call time, not import time)
+  - Streaming mode uses worktree `workspace` param (not env var) for isolation
+- **Full-stack instrumentation** — every layer creates hierarchical spans:
+  - `message.receive` -> `router.classify` -> `memory.recall` -> `prompt.build` -> `llm.call` -> `memory.observe` -> `slack.reply`
+  - Router creates `router.llm` generation child span
+  - Memory agent creates `mem0.search` spans per scope and `extraction.haiku` + `mem0.store` spans during observe
+  - `memory.observe` span closed in background thread after sub-spans complete
+- **Shared event parser** (`_handle_event` + `_ParseState`) — eliminates ~80 lines of duplicated parsing logic between batch and streaming modes
+- **26 new tests** — observability tracer (batch buffer, spans, generations, detail levels, backwards compat), streaming parser, provider mode selection
 
 ### Previously added
 - **Unified memory schema** (`memory_schema.py`) — single source of truth for memory scopes and types, shared between extraction (write) and router recall (read)
