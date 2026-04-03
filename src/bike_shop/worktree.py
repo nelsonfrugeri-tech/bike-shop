@@ -84,9 +84,26 @@ def create_worktree(
 
     wt_path = os.path.join(base, name)
 
-    # Already exists — return it
+    # Already exists — sync with latest main before reusing
     if os.path.isdir(wt_path):
-        logger.info("[worktree] Reusing existing worktree: %s", wt_path)
+        try:
+            subprocess.run(
+                ["git", "fetch", "origin", base_branch],
+                cwd=wt_path,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            subprocess.run(
+                ["git", "merge", f"origin/{base_branch}", "--no-edit"],
+                cwd=wt_path,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            logger.info("[worktree] Reusing existing worktree (synced with %s): %s", base_branch, wt_path)
+        except Exception as e:
+            logger.warning("[worktree] Failed to sync worktree %s: %s — reusing as-is", wt_path, e)
         return wt_path
 
     if branch is None:
