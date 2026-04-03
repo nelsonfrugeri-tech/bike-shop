@@ -569,9 +569,8 @@ See [MANIFEST.md](MANIFEST.md) for the full process definition.
 | `AGENT_WORKTREE_DIR` | ✅ | Directory where agent worktrees are created (separate from main repo) |
 | `MSG_BUFFER_WINDOW` | | Seconds to buffer rapid-fire messages (default: `3.0`) |
 | `MAX_BATCH_SIZE` | | Max messages per batch before immediate flush (default: `10`) |
-| `CLAUDE_TIMEOUT_SMALL` | | Timeout for small prompts <8k tokens (default: `180`s) |
-| `CLAUDE_TIMEOUT_MEDIUM` | | Timeout for medium prompts 8k-32k tokens (default: `300`s) |
-| `CLAUDE_TIMEOUT_LARGE` | | Timeout for large prompts >32k tokens (default: `600`s) |
+| `CLAUDE_IDLE_TIMEOUT` | | Seconds of no stdout before killing a stuck process (default: `300`) |
+| `CLAUDE_MAX_TIMEOUT` | | Absolute safety timeout in seconds (default: `1800`) |
 | `LANGFUSE_PUBLIC_KEY` | | Langfuse public key for tracing |
 | `LANGFUSE_SECRET_KEY` | | Langfuse secret key for tracing |
 | `LANGFUSE_HOST` | | Langfuse URL (default: `http://localhost:3000`) |

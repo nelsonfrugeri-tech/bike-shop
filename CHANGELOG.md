@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Idle-based watchdog** replaces static timeout tiers for Claude CLI subprocess — kills process only when stdout is silent for `CLAUDE_IDLE_TIMEOUT` seconds (default 5min), with a 30min absolute safety net (`CLAUDE_MAX_TIMEOUT`). Fixes issue #24 where legitimate long-running tasks (33+ tools) were killed because the prompt was short.
+
+### Removed
+- `CLAUDE_TIMEOUT_SMALL`, `CLAUDE_TIMEOUT_MEDIUM`, `CLAUDE_TIMEOUT_LARGE` env vars and `_select_timeout()` — replaced by idle-based detection
+
 ### Added
 - **Mandatory worktree isolation** (`worktree.py`) — each agent works in an isolated git worktree under `AGENT_WORKTREE_DIR`, preventing PR cross-contamination between agents
   - `ensure_worktree(agent_key, task_id)` — creates or reuses a worktree
@@ -20,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Multiple messages: consolidated prompt with parallel execution instructions
   - `MSG_BUFFER_WINDOW` and `MAX_BATCH_SIZE` env vars for tuning
 - **Batch prompt** with parallel execution instructions — when receiving multiple tasks, Claude analyzes dependencies and uses the Agent tool to spawn sub-agents in isolated worktrees
-- **Dynamic timeout** for Claude CLI — 3min (<8k tokens), 5min (8k-32k tokens), 10min (>32k tokens), based on prompt size
+- **Idle-based watchdog** for Claude CLI — kills only when process stops producing stdout for `CLAUDE_IDLE_TIMEOUT` seconds (default 5min), with absolute safety net at `CLAUDE_MAX_TIMEOUT` (default 30min)
 - **Graceful process kill** on timeout — SIGTERM → 5s grace → SIGKILL with process group cleanup (prevents zombie servers like uvicorn)
 
 ### Previously added
