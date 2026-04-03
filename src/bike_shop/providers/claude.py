@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -18,25 +19,14 @@ from bike_shop.providers import LLMProvider
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Timeout tiers based on prompt size (characters)
-# ~4 chars ~ 1 token (English text average)
+# Idle-based watchdog: kill process only when it stops producing output
 # ---------------------------------------------------------------------------
-TIMEOUT_SMALL = int(os.environ.get("CLAUDE_TIMEOUT_SMALL", "180"))     # 3 min — < 8k tokens
-TIMEOUT_MEDIUM = int(os.environ.get("CLAUDE_TIMEOUT_MEDIUM", "300"))   # 5 min — 8k-32k tokens
-TIMEOUT_LARGE = int(os.environ.get("CLAUDE_TIMEOUT_LARGE", "600"))     # 10 min — > 32k tokens
+IDLE_TIMEOUT = int(os.environ.get("CLAUDE_IDLE_TIMEOUT", "300"))  # 5 min default
 
-CONTEXT_MEDIUM_THRESHOLD = 32_000   # ~8k tokens
-CONTEXT_LARGE_THRESHOLD = 128_000   # ~32k tokens
+# Absolute safety net -- kill no matter what after this duration
+MAX_ABSOLUTE_TIMEOUT = int(os.environ.get("CLAUDE_MAX_TIMEOUT", "1800"))  # 30 min
 
-
-def _select_timeout(prompt: str) -> int:
-    """Select timeout tier based on prompt size."""
-    size = len(prompt)
-    if size >= CONTEXT_LARGE_THRESHOLD:
-        return TIMEOUT_LARGE
-    if size >= CONTEXT_MEDIUM_THRESHOLD:
-        return TIMEOUT_MEDIUM
-    return TIMEOUT_SMALL
+GRACE_PERIOD = 5  # seconds between SIGTERM and SIGKILL
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +209,10 @@ class ClaudeProvider(LLMProvider):
         if github_token:
             env["GH_TOKEN"] = github_token
 
-        timeout = _select_timeout(prompt)
-        logger.debug("[%s] Calling Claude CLI (model=%s, timeout=%ds, prompt=%d chars)...",
-                     config.name, model_id, timeout, len(prompt))
+        logger.debug(
+            "[%s] Calling Claude CLI (model=%s, idle_timeout=%ds, prompt=%d chars)...",
+            config.name, model_id, IDLE_TIMEOUT, len(prompt),
+        )
         start_time = time.time()
 
         if not workspace:
@@ -255,7 +246,6 @@ class ClaudeProvider(LLMProvider):
                 router_meta=router_meta,
                 start_time=start_time,
                 workspace=workspace,
-                timeout=timeout,
             )
 
     def _call_batch(
@@ -272,14 +262,17 @@ class ClaudeProvider(LLMProvider):
         router_meta: dict | None,
         start_time: float,
         workspace: str,
-        timeout: int,
     ) -> tuple[str, str | None]:
-        """Original subprocess.run batch mode — fallback."""
+        """Batch mode with idle-based watchdog."""
         try:
-            result = self._run_with_graceful_timeout(
-                cmd, timeout=timeout,
+            result = _run_with_idle_watchdog(
+                cmd,
+                idle_timeout=IDLE_TIMEOUT,
+                max_timeout=MAX_ABSOLUTE_TIMEOUT,
+                grace_period=GRACE_PERIOD,
                 cwd=workspace,
                 env=env,
+                agent_name=config.name,
             )
             duration_ms = (time.time() - start_time) * 1000
 
@@ -307,72 +300,27 @@ class ClaudeProvider(LLMProvider):
 
             return response, new_session_id
 
-        except subprocess.TimeoutExpired:
+        except _IdleTimeoutError as e:
             duration_ms = (time.time() - start_time) * 1000
-            logger.warning("[%s] Claude CLI timed out after %ds (%.0fms)",
-                          config.name, timeout, duration_ms)
+            logger.warning(
+                "[%s] Claude CLI idle timeout after %ds (%.0fms): %s",
+                config.name, e.idle_seconds, duration_ms, e,
+            )
             tracer.trace_error(
-                error=f"Timeout after {timeout}s (prompt={len(prompt)} chars)",
+                error=f"Idle timeout after {e.idle_seconds}s (prompt={len(prompt)} chars)",
                 context=prompt[-500:],
             )
-            return f"(timeout after {timeout // 60}min — task was too long, try breaking it into smaller steps)", None
+            return (
+                f"(timeout after {e.idle_seconds // 60}min "
+                f"-- agent was idle, task may be stuck)",
+                None,
+            )
 
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
             logger.error("Claude CLI error: %s", e)
             tracer.trace_error(error=str(e), context=prompt[-500:])
             return "(error)", None
-
-    @staticmethod
-    def _run_with_graceful_timeout(
-        cmd: list[str],
-        timeout: int,
-        cwd: str,
-        env: dict[str, str],
-        grace_period: int = 5,
-    ) -> subprocess.CompletedProcess[str]:
-        """Run subprocess with graceful shutdown on timeout.
-
-        On timeout: SIGTERM -> wait grace_period -> SIGKILL.
-        This kills child processes (uvicorn, servers) cleanly.
-        """
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=cwd,
-            env=env,
-            start_new_session=True,  # own process group for clean kill
-        )
-
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-        except subprocess.TimeoutExpired:
-            # Graceful: SIGTERM the entire process group
-            pgid = os.getpgid(proc.pid)
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
-            # Wait for grace period
-            try:
-                stdout, stderr = proc.communicate(timeout=grace_period)
-                logger.info("[claude] Process terminated gracefully after SIGTERM")
-                return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-            except subprocess.TimeoutExpired:
-                # Force kill the entire process group
-                try:
-                    os.killpg(pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                proc.kill()
-                proc.wait()
-                logger.warning("[claude] Process force-killed after SIGKILL")
-                raise subprocess.TimeoutExpired(cmd, timeout)
 
     def _call_streaming(
         self,
@@ -610,3 +558,169 @@ def _parse_response(stdout: str) -> tuple[str, str | None, dict[str, Any]]:
         state.response = "..."
 
     return state.response, state.session_id, state.to_usage_dict()
+
+
+# ---------------------------------------------------------------------------
+# Idle-based watchdog — module-level functions
+# ---------------------------------------------------------------------------
+
+
+class _IdleTimeoutError(Exception):
+    """Raised when the process has been idle (no stdout) for too long."""
+
+    def __init__(self, idle_seconds: int, reason: str = "idle") -> None:
+        self.idle_seconds = idle_seconds
+        self.reason = reason
+        super().__init__(f"Process {reason} for {idle_seconds}s")
+
+
+def _graceful_kill(proc: subprocess.Popen[str], grace_period: int = 5) -> None:
+    """SIGTERM to process group, wait grace, then SIGKILL."""
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    try:
+        proc.wait(timeout=grace_period)
+        logger.info("[claude] Process terminated gracefully after SIGTERM")
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+        logger.warning("[claude] Process force-killed after SIGKILL")
+
+
+def _run_with_idle_watchdog(
+    cmd: list[str],
+    *,
+    idle_timeout: int,
+    max_timeout: int,
+    grace_period: int = 5,
+    cwd: str,
+    env: dict[str, str],
+    agent_name: str = "claude",
+) -> subprocess.CompletedProcess[str]:
+    """Run subprocess with idle-based watchdog.
+
+    Monitors stdout line by line. If no output is produced for
+    ``idle_timeout`` seconds, the process is killed gracefully.
+    An absolute ``max_timeout`` acts as a safety net.
+
+    Returns:
+        CompletedProcess with collected stdout/stderr.
+
+    Raises:
+        _IdleTimeoutError: when idle or absolute timeout triggers.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    last_activity = time.monotonic()
+    start_time = time.monotonic()
+    stop_event = threading.Event()
+    kill_reason: str | None = None
+
+    def _reader() -> None:
+        """Read stdout line by line, update last_activity timestamp.
+
+        Note: iteration is line-buffered. If the process emits partial
+        lines without trailing newline, last_activity won't update
+        until the line completes or the pipe closes.
+        """
+        nonlocal last_activity
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                stdout_lines.append(line)
+                last_activity = time.monotonic()
+                if stop_event.is_set():
+                    break
+        except ValueError:
+            # stdout closed
+            pass
+
+    def _stderr_reader() -> None:
+        """Read stderr line by line into stderr_lines.
+
+        stderr activity does NOT update last_activity -- only stdout
+        matters for idle detection.
+        """
+        assert proc.stderr is not None
+        try:
+            for line in proc.stderr:
+                stderr_lines.append(line)
+                if stop_event.is_set():
+                    break
+        except ValueError:
+            # stderr closed
+            pass
+
+    def _watchdog() -> None:
+        """Check idle time and absolute timeout periodically."""
+        nonlocal kill_reason
+        while not stop_event.wait(timeout=1.0):
+            now = time.monotonic()
+            idle_elapsed = now - last_activity
+            total_elapsed = now - start_time
+
+            if total_elapsed >= max_timeout:
+                kill_reason = "absolute_timeout"
+                logger.warning(
+                    "[%s] Process hit absolute timeout (%ds) -- killing",
+                    agent_name, max_timeout,
+                )
+                _graceful_kill(proc, grace_period)
+                stop_event.set()
+                return
+
+            if idle_elapsed >= idle_timeout:
+                kill_reason = "idle"
+                logger.warning(
+                    "[%s] Process idle for %ds -- killing",
+                    agent_name, int(idle_elapsed),
+                )
+                _graceful_kill(proc, grace_period)
+                stop_event.set()
+                return
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    stderr_reader_thread = threading.Thread(target=_stderr_reader, daemon=True)
+    watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+
+    reader_thread.start()
+    stderr_reader_thread.start()
+    watchdog_thread.start()
+
+    proc.wait()
+    stop_event.set()
+    reader_thread.join(timeout=5)
+    stderr_reader_thread.join(timeout=5)
+    watchdog_thread.join(timeout=5)
+
+    stderr = "".join(stderr_lines)
+    stdout = "".join(stdout_lines)
+
+    if kill_reason == "idle":
+        raise _IdleTimeoutError(idle_timeout, reason="idle")
+    if kill_reason == "absolute_timeout":
+        raise _IdleTimeoutError(max_timeout, reason="hit absolute safety timeout")
+
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
