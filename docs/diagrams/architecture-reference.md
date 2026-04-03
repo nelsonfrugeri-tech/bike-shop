@@ -65,7 +65,7 @@
 |   |  | debater  | |  tech-pm  | | explorer|   |           |      |        |             |
 |   |  +----------+ +-----------+ +---------+   |           |      |        |             |
 |   |  +----------+ +-----------+ +----------+  |           |      |        |             |
-|   |  | builder  | | sentinel  | |memory-agt|  |           |      |        |             |
+|   |  | builder  | | dev-ts    | |review-ts |  |           |      |        |             |
 |   |  +----------+ +-----+-----+ +----------+  |           |      |        |             |
 |   +-------------------------------------------+           |      |        |             |
 |                          |                                 |      |        |             |
@@ -140,10 +140,10 @@ Sentinel Agent ---[query traces]---> Langfuse
 | Elliot Alderson  |     | dev-py            |
 | Tyrell Wellick   |     | review-py         |
 +------------------+     | builder           |
-        |                 | sentinel          |
-        |   ANY body can  | debater           |
-        +-- run ANY --->  | tech-pm           |
-            expert        | explorer          |
-                          | memory-agent      |
+        |                 | dev-ts            |
+        |   ANY body can  | review-ts         |
+        +-- run ANY --->  | debater           |
+            expert        | tech-pm           |
+                          | explorer          |
                           +-------------------+
 ```
