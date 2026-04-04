@@ -602,7 +602,7 @@ def _parse_stream(
                 input=thought,
                 metadata={"type": "thinking"},
             )
-            tracer.end_span(span_id, trace_id=trace_id)
+            tracer.end_span(span_id, trace_id=trace_id, output=thought)
 
         elif kind == "tool_result":
             tool_use_id = data.get("tool_use_id", "")
