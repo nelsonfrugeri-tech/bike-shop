@@ -75,21 +75,22 @@ The **Semantic Router** dynamically assigns them specialized experts (architect,
    a. Checks if the bot was @mentioned
    b. Fetches thread context (last 20 messages) from Slack API
 
-4. Semantic Router classifies the message:
-   → agent + model selection
-   → memory intent: decides if cross-thread memory is needed
-   → { agent: "architect", model: "opus", reason: "...", memory: [{query: "...", scopes: [...], types: [...]}] }
+4. Semantic Router (passthrough — no LLM call):
+   → discovers available experts from disk
+   → injects expert list into agent system prompt
+   → returns immediately (~0ms)
 
-5. Memory recall (two modes):
+5. Memory recall:
    a. New thread (no session): full recall — searches all 3 Mem0 scopes (agent, project, team)
-   b. Router-driven: filtered recall — targeted searches by scope + type (decision, procedure, etc.)
-   c. Existing thread with --resume and no memory request: skip (--resume has full history)
+   b. Existing thread with --resume: skip (--resume has full history)
+   c. Agents can use Mem0 MCP tools directly for targeted lookups
 
 6. Prompt is assembled:
-   System prompt + Project manifest + Memory context + Thread context + User message
+   System prompt (with expert list) + Project manifest + Memory context + Thread context + User message
 
 7. Claude Code CLI is called:
-   claude -p "{prompt}" --agent architect --model opus --resume {session_id} --dangerously-skip-permissions
+   claude -p "{prompt}" --model sonnet --resume {session_id} --dangerously-skip-permissions
+   The agent decides which expert to spawn via Agent tool based on task analysis
 
 8. Response is parsed from stream-json:
    - Text response extracted
@@ -108,34 +109,17 @@ The **Semantic Router** dynamically assigns them specialized experts (architect,
 11. Response posted back to Slack thread
 ```
 
-### Semantic Router — The Decision Brain
+### Semantic Router — Expert Registry & Passthrough
 
-Every incoming message passes through the Semantic Router before reaching the LLM. It classifies agent, model, and memory intent:
+The Semantic Router is a lightweight passthrough that discovers available experts at boot but does **not** call any LLM. Claude Code (the agents themselves) decides which expert to spawn and which model to use via the Agent tool — eliminating 10-23s of routing latency per message.
 
-```json
-{
-  "agent": "architect",
-  "model": "opus",
-  "reason": "System design with multiple components requires deep architectural thinking",
-  "memory": [
-    {"query": "architecture decisions", "scopes": ["project"], "types": ["decision"]},
-    {"query": "deployment procedures", "scopes": ["team"], "types": ["procedure"]}
-  ]
-}
-```
+The router **dynamically discovers experts** at boot by scanning `~/.claude/agents/experts/*.md` and parsing each file's frontmatter (`name` + `description`). The expert list is injected into agent system prompts so they know what specialists are available. Adding a new expert is zero-code: drop a `.md` file in the experts directory and restart.
 
-The router **dynamically discovers experts** at boot by scanning `~/.claude/agents/experts/*.md` and parsing each file's frontmatter (`name` + `description`). Adding a new expert is zero-code: drop a `.md` file in the experts directory and restart. Example routing decisions:
-
-| Task Type | Expert | Model | Why |
-|-----------|---------------|-------|-----|
-| Architecture, system design | `architect` | opus | Deep thinking, trade-offs |
-| Code review, PR review | `review-py` | sonnet | Standard analysis |
-| Comparing approaches, trade-offs | `debater` | sonnet/opus | Depends on depth |
-| Exploring existing codebase | `explorer` | sonnet | Code navigation |
-| Heavy Python implementation | `dev-py` | sonnet | Standard coding |
-| Business analysis, product | `tech-pm` | sonnet | Standard analysis |
-| Infrastructure setup | `builder` | sonnet | Standard execution |
-| Simple question, confirmation | (none) | haiku | Quick and cheap |
+**How it works now:**
+1. Message arrives -> router returns passthrough (no LLM call, ~0ms)
+2. Expert list is injected into the agent's system prompt
+3. The agent analyzes the task and spawns the right expert via Agent tool
+4. The agent chooses the model based on task complexity (opus/sonnet/haiku)
 
 ### Experts & Agents — The Architecture
 
@@ -288,7 +272,7 @@ projects:
 
 | Feature | Description |
 |---------|-------------|
-| 🧠 **Semantic Router** | Classifies every message → selects agent + model + memory intent |
+| 🧠 **Semantic Router** | Lightweight passthrough + expert registry — agents self-organize via Agent tool |
 | 🧬 **Shared Memory** | Mem0 with semantic search — all agents share the same project memory |
 | 🌿 **Worktree Isolation** | Each agent works in an isolated git worktree — no PR cross-contamination |
 | ⚡ **Message Batching** | Rapid-fire messages are buffered and processed as a single consolidated batch |
@@ -310,8 +294,8 @@ projects:
 └────────────────────────┬────────────────────────────────┘
                          │
               ┌──────────▼──────────┐
-              │   Semantic Router   │  ← haiku classifies
-              │  (agent + model)    │     every message
+              │   Semantic Router   │  ← passthrough + expert
+              │  (expert registry)  │     registry (no LLM)
               └──────────┬──────────┘
                          │
          ┌───────────────┼───────────────┐
@@ -367,7 +351,7 @@ bike-shop/
 │   ├── config.py                # AgentConfig, MODEL_MAP, env loading
 │   ├── agents.py                # Agent prompts (common rules, no personality)
 │   ├── project.py               # Multi-project: ProjectConfig, ProjectRegistry, ProjectResolver
-│   ├── router.py                # Semantic Router (haiku → agent + model, dynamic expert discovery)
+│   ├── router.py                # Semantic Router (passthrough + expert registry, no LLM)
 │   ├── memory_agent.py          # MemoryAgent (Mem0: recall, recall_filtered, observe)
 │   ├── memory_schema.py         # Unified memory domain (scopes + types)
 │   ├── worktree.py              # Git worktree isolation per agent/task
@@ -533,7 +517,7 @@ Every Slack message produces a **hierarchical real-time trace** — spans are cr
 Trace: "mr-robot/slack-message"
 ├── Span: "message.receive"
 ├── Span: "router.classify"
-│   └── Generation: "router.llm" (sonnet, with tokens)
+│   └── Span: "router.passthrough" (no LLM, ~0ms)
 ├── Span: "memory.recall"
 │   ├── Span: "mem0.search" scope=agent
 │   ├── Span: "mem0.search" scope=project

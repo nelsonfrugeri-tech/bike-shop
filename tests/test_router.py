@@ -1,15 +1,14 @@
-"""Tests for dynamic expert discovery in SemanticRouter."""
+"""Tests for SemanticRouter — expert discovery and passthrough routing."""
 
 from __future__ import annotations
 
-import json
-import subprocess
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
+from bike_shop.config import MODEL_MAP
 from bike_shop.router import _parse_frontmatter, SemanticRouter
 
 
@@ -126,7 +125,7 @@ class TestParseFrontmatter:
 
 
 # ---------------------------------------------------------------------------
-# SemanticRouter._discover_experts / _build_prompt
+# Helper
 # ---------------------------------------------------------------------------
 
 
@@ -143,6 +142,11 @@ def _create_expert(directory: Path, name: str, desc: str) -> None:
     """))
 
 
+# ---------------------------------------------------------------------------
+# SemanticRouter._discover_experts
+# ---------------------------------------------------------------------------
+
+
 class TestDiscoverExperts:
     """Tests for dynamic expert discovery."""
 
@@ -156,9 +160,6 @@ class TestDiscoverExperts:
         router = SemanticRouter(experts_dir=str(tmp_path))
 
         assert router._validated_experts == {"alpha", "beta"}
-        assert "- alpha: First expert" in router._build_prompt(router._experts)
-        assert "- beta: Second expert" in router._build_prompt(router._experts)
-        assert "- none:" in router._build_prompt(router._experts)
 
     @patch("bike_shop.router.Tracer")
     def test_empty_directory_fallback(
@@ -170,21 +171,6 @@ class TestDiscoverExperts:
         router = SemanticRouter(experts_dir=str(empty))
 
         assert len(router._validated_experts) == 0
-        assert "- none:" in router._build_prompt(router._experts)
-
-    @patch("bike_shop.router.Tracer")
-    def test_prompt_contains_no_hardcoded_experts(
-        self, _mock_tracer: object, tmp_path: Path,
-    ) -> None:
-        _create_expert(tmp_path, "only-one", "The only expert. Nothing else.")
-
-        router = SemanticRouter(experts_dir=str(tmp_path))
-
-        # Should NOT contain old hardcoded experts as agent entries
-        assert "- dev-py:" not in router._build_prompt(router._experts)
-        assert "- architect:" not in router._build_prompt(router._experts)
-        # Should contain the discovered one
-        assert "only-one" in router._build_prompt(router._experts)
 
     @patch("bike_shop.router.Tracer")
     def test_skips_unparseable_files(
@@ -257,71 +243,84 @@ class TestDiscoverExperts:
 
 
 # ---------------------------------------------------------------------------
-# SemanticRouter.route() with subprocess mock
+# SemanticRouter.route() — passthrough (no LLM)
 # ---------------------------------------------------------------------------
 
 
 class TestRoute:
-    """Tests for route() with subprocess mocked."""
+    """Tests for passthrough route() — no subprocess, no LLM."""
 
     @patch("bike_shop.router.Tracer")
-    def _make_router(self, _mock_tracer: object, tmp_path: Path) -> SemanticRouter:
-        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
-        _create_expert(tmp_path, "architect", "System design expert. Makes diagrams.")
-        return SemanticRouter(experts_dir=str(tmp_path))
-
-    @patch("bike_shop.router.Tracer")
-    @patch("bike_shop.router.subprocess.run")
-    def test_route_delegates_to_expert(
-        self, mock_run: MagicMock, _mock_tracer: object, tmp_path: Path,
+    def test_route_returns_passthrough_with_sonnet_default(
+        self, _mock_tracer: object, tmp_path: Path,
     ) -> None:
         _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
         router = SemanticRouter(experts_dir=str(tmp_path))
-
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=json.dumps({"agent": "dev-py", "model": "opus", "reason": "complex coding"}),
-            stderr="",
-        )
 
         result = router.route("implement the auth module")
 
-        assert result["agent"] == "dev-py"
-        assert result["model_name"] == "opus"
-        # Verify the dynamic prompt was passed via stdin (input kwarg)
-        call_kwargs = mock_run.call_args[1]
-        assert "dev-py" in call_kwargs.get("input", "")
+        assert result["agent"] is None
+        assert result["model"] == MODEL_MAP["sonnet"]
+        assert result["model_name"] == "sonnet"
+        assert "passthrough" in result["reason"]
+        assert result["memory"] == []
 
     @patch("bike_shop.router.Tracer")
-    @patch("bike_shop.router.subprocess.run")
-    def test_route_unknown_expert_falls_back(
-        self, mock_run: MagicMock, _mock_tracer: object, tmp_path: Path,
+    def test_route_returns_passthrough_with_empty_experts(
+        self, _mock_tracer: object, tmp_path: Path,
     ) -> None:
-        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
-        router = SemanticRouter(experts_dir=str(tmp_path))
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        router = SemanticRouter(experts_dir=str(empty))
 
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=json.dumps({"agent": "nonexistent", "model": "sonnet", "reason": "test"}),
-            stderr="",
-        )
-
-        result = router.route("do something")
-
-        assert result["agent"] is None  # fell back because expert not on disk
-
-    @patch("bike_shop.router.Tracer")
-    @patch("bike_shop.router.subprocess.run")
-    def test_route_timeout_falls_back_to_sonnet(
-        self, mock_run: MagicMock, _mock_tracer: object, tmp_path: Path,
-    ) -> None:
-        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
-        router = SemanticRouter(experts_dir=str(tmp_path))
-
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=30)
-
-        result = router.route("anything")
+        result = router.route("hello")
 
         assert result["agent"] is None
-        assert result["model_name"] == "sonnet"
-        assert result["reason"] == "router_fallback"
+        assert result["model"] == MODEL_MAP["sonnet"]
+        assert result["memory"] == []
+
+    @patch("bike_shop.router.Tracer")
+    def test_route_with_trace_id_creates_span(
+        self, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
+        router = SemanticRouter(experts_dir=str(tmp_path))
+
+        # Should not raise even with trace_id
+        result = router.route("test", trace_id="trace-123", parent_span_id="span-456")
+
+        assert result["agent"] is None
+
+
+# ---------------------------------------------------------------------------
+# SemanticRouter.get_experts_description()
+# ---------------------------------------------------------------------------
+
+
+class TestGetExpertsDescription:
+    """Tests for expert description formatting."""
+
+    @patch("bike_shop.router.Tracer")
+    def test_formats_experts_sorted(
+        self, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        _create_expert(tmp_path, "dev-py", "Python development expert. Writes code.")
+        _create_expert(tmp_path, "architect", "System design expert. Makes diagrams.")
+        router = SemanticRouter(experts_dir=str(tmp_path))
+
+        desc = router.get_experts_description()
+
+        lines = desc.strip().split("\n")
+        assert len(lines) == 2
+        assert lines[0].startswith("- architect:")
+        assert lines[1].startswith("- dev-py:")
+
+    @patch("bike_shop.router.Tracer")
+    def test_returns_empty_string_when_no_experts(
+        self, _mock_tracer: object, tmp_path: Path,
+    ) -> None:
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        router = SemanticRouter(experts_dir=str(empty))
+
+        assert router.get_experts_description() == ""

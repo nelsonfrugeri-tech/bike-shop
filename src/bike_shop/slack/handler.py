@@ -101,9 +101,15 @@ def _read_project_context() -> str:
 
 def _build_prompt(config: AgentConfig, context: str, question: str,
                   github_token: str | None,
-                  shared_memory: str = "") -> str:
+                  shared_memory: str = "",
+                  experts_list: str = "") -> str:
     """Assemble the full prompt from system prompt + instructions + context."""
-    parts = [config.system_prompt]
+    system_prompt = config.system_prompt
+    if experts_list:
+        system_prompt = system_prompt.replace("{AVAILABLE_EXPERTS}", experts_list)
+    else:
+        system_prompt = system_prompt.replace("{AVAILABLE_EXPERTS}", "(no experts discovered)")
+    parts = [system_prompt]
 
     # Project context
     parts.append(_read_project_context())
@@ -130,9 +136,15 @@ def _build_prompt(config: AgentConfig, context: str, question: str,
 def _build_batch_prompt(config: AgentConfig, context: str,
                         messages: list[dict[str, Any]],
                         github_token: str | None,
-                        shared_memory: str = "") -> str:
+                        shared_memory: str = "",
+                        experts_list: str = "") -> str:
     """Assemble prompt for a batch of messages."""
-    parts = [config.system_prompt]
+    system_prompt = config.system_prompt
+    if experts_list:
+        system_prompt = system_prompt.replace("{AVAILABLE_EXPERTS}", experts_list)
+    else:
+        system_prompt = system_prompt.replace("{AVAILABLE_EXPERTS}", "(no experts discovered)")
+    parts = [system_prompt]
     parts.append(_read_project_context())
 
     if github_token:
@@ -307,7 +319,8 @@ class SlackAgentHandler:
                   workspace: str | None = None,
                   trace_id: str | None = None,
                   parent_span_id: str | None = None,
-                  project: ProjectConfig | None = None) -> str:
+                  project: ProjectConfig | None = None,
+                  experts_list: str = "") -> str:
         """Call the LLM provider and handle session tracking."""
         config = self._config
         tracer = self._get_tracer(project)
@@ -346,7 +359,7 @@ class SlackAgentHandler:
             input={"question_length": len(question)},
         ) if trace_id else None
 
-        prompt = _build_prompt(config, context, question, github_token, shared_memory)
+        prompt = _build_prompt(config, context, question, github_token, shared_memory, experts_list)
 
         if prompt_span_id and trace_id:
             tracer.end_span(prompt_span_id, trace_id=trace_id,
@@ -395,7 +408,8 @@ class SlackAgentHandler:
     def _call_llm_batch(self, context: str, messages: list[dict[str, Any]],
                         thread_ts: str, workspace: str | None = None,
                         trace_id: str | None = None,
-                        project: ProjectConfig | None = None) -> str:
+                        project: ProjectConfig | None = None,
+                        experts_list: str = "") -> str:
         """Call LLM with a batch of messages."""
         config = self._config
         tracer = self._get_tracer(project)
@@ -411,7 +425,7 @@ class SlackAgentHandler:
         combined_text = " ".join(m.get("text", "") for m in messages)
         shared_memory = memory_agent.recall(combined_text, has_session=session_id is not None)
 
-        prompt = _build_batch_prompt(config, context, messages, github_token, shared_memory)
+        prompt = _build_batch_prompt(config, context, messages, github_token, shared_memory, experts_list)
 
         if workspace is None:
             workspace = self._get_workspace(project=project)
@@ -464,47 +478,42 @@ class SlackAgentHandler:
             tracer.end_span(receive_span, trace_id=trace_id,
                             output={"cleaned_text": question[:200]})
 
-            # Semantic Router — decide agent + model + memory (with Slack thread context)
+            # Semantic Router — passthrough (no LLM), kept for observability
             router_span = tracer.start_span("router.classify", trace_id=trace_id,
                                                input={"question": question[:300]})
             route = self._router.route(
                 question, thread_context=context,
                 trace_id=trace_id, parent_span_id=router_span,
             )
-            agent_override = route.get("agent")
-            model_override = route.get("model")
-            router_model_name = route.get("model_name", "sonnet")
-            router_reason = route.get("reason", "")
-            memory_requests = route.get("memory", [])
             tracer.end_span(router_span, trace_id=trace_id,
-                            output=json.dumps({"agent": agent_override, "model": router_model_name}),
-                            metadata={"reason": router_reason})
+                            output=json.dumps({"decision": "passthrough"}),
+                            metadata={"reason": route.get("reason", "")})
 
-            logger.info("[%s] Router: agent=%s model=%s memory_lookups=%d reason=%s",
-                        config.name, agent_override or "direct",
-                        router_model_name, len(memory_requests), router_reason)
+            logger.info("[%s] Router: passthrough — Claude Code will decide expert/model",
+                        config.name)
 
-            # Manual trigger overrides router's model choice
+            # Model: default sonnet, manual trigger overrides to opus
+            model_override = config.model_id
             force_opus = self._switcher.is_manual_trigger(question)
             if force_opus:
                 model_override = config.opus_model_id
-                router_model_name = "opus (manual override)"
                 logger.info("[%s] Project lead override -> Opus", config.name)
 
             # Resolve workspace once — reuse for LLM call and worktree diff
             workspace = self._get_workspace(project=project)
 
+            # Get experts list for prompt injection
+            experts_list = self._router.get_experts_description()
+
             reply = self._call_llm(context, question, thread_ts,
                                    model_override=model_override,
-                                   agent_override=agent_override,
-                                   router_meta={"model_name": router_model_name,
-                                                "reason": router_reason,
-                                                "agent": agent_override},
+                                   router_meta={"model_name": "sonnet",
+                                                "reason": "passthrough"},
                                    channel=channel,
-                                   memory_requests=memory_requests,
                                    workspace=workspace,
                                    trace_id=trace_id,
-                                   project=project)
+                                   project=project,
+                                   experts_list=experts_list)
 
             if self._switcher.has_marker(reply):
                 if not self._switcher.should_escalate(thread_ts):
@@ -615,9 +624,12 @@ class SlackAgentHandler:
 
             workspace = self._get_workspace(project=project)
 
+            experts_list = self._router.get_experts_description()
+
             reply = self._call_llm_batch(
                 context, messages, thread_ts,
                 workspace=workspace, trace_id=trace_id, project=project,
+                experts_list=experts_list,
             )
 
             logger.info("[%s] Batch replied (%d chars): %s", config.name, len(reply), reply[:80])
