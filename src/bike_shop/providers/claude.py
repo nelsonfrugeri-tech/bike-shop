@@ -137,6 +137,75 @@ def _handle_event(event: dict[str, Any], state: _ParseState,
         if on_span:
             on_span("tool_result", event, state)
 
+    # Tool results in user messages (stream-json format for Agent tool etc.)
+    if event_type == "user":
+        message = event.get("message", {})
+        has_agent_result = "tool_use_result" in event
+
+        for block in message.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_use_id = block.get("tool_use_id", "")
+                content_blocks = block.get("content", "")
+                if isinstance(content_blocks, list):
+                    content = " ".join(
+                        b.get("text", "")
+                        for b in content_blocks
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )[:1000]
+                else:
+                    content = str(content_blocks)[:1000]
+                is_error = block.get("is_error", False)
+
+                state.tool_results.append({
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": is_error,
+                })
+
+                # Skip tool_result span if agent_result will handle closing
+                if on_span and not has_agent_result:
+                    on_span("tool_result", {
+                        "tool_use_id": tool_use_id,
+                        "content": content,
+                        "is_error": is_error,
+                    }, state)
+
+        # Agent-specific metadata from tool_use_result
+        tool_use_result = event.get("tool_use_result")
+        if tool_use_result and on_span:
+            first_block = (message.get("content") or [{}])[0]
+            on_span("agent_result", {
+                "tool_use_id": first_block.get("tool_use_id", ""),
+                "agent_type": tool_use_result.get("agentType", ""),
+                "status": tool_use_result.get("status", ""),
+                "total_tokens": tool_use_result.get("totalTokens", 0),
+                "total_tool_uses": tool_use_result.get("totalToolUseCount", 0),
+                "duration_ms": tool_use_result.get("totalDurationMs", 0),
+                "usage": tool_use_result.get("usage", {}),
+            }, state)
+
+    # Sub-agent lifecycle: task_started
+    if event_type == "system" and event.get("subtype") == "task_started":
+        if on_span:
+            on_span("task_started", {
+                "task_id": event.get("task_id", ""),
+                "tool_use_id": event.get("tool_use_id", ""),
+                "description": event.get("description", ""),
+                "task_type": event.get("task_type", ""),
+                "prompt": event.get("prompt", "")[:500],
+            }, state)
+
+    # Sub-agent lifecycle: task_notification
+    if event_type == "system" and event.get("subtype") == "task_notification":
+        if on_span:
+            on_span("task_notification", {
+                "task_id": event.get("task_id", ""),
+                "tool_use_id": event.get("tool_use_id", ""),
+                "status": event.get("status", ""),
+                "summary": event.get("summary", ""),
+                "usage": event.get("usage", {}),
+            }, state)
+
     # Error events
     if event_type == "error":
         error_entry = {
@@ -500,12 +569,53 @@ def _parse_stream(
             is_error = data.get("is_error", False)
             if tool_use_id in tool_span_map:
                 tracer.end_span(
-                    tool_span_map[tool_use_id],
+                    tool_span_map.pop(tool_use_id),
                     trace_id=trace_id,
                     output=content,
                     metadata={"is_error": is_error},
                     level="ERROR" if is_error else None,
                 )
+
+        elif kind == "agent_result":
+            tool_use_id = data.get("tool_use_id", "")
+            if tool_use_id in tool_span_map:
+                tracer.end_span(
+                    tool_span_map.pop(tool_use_id),
+                    trace_id=trace_id,
+                    output={
+                        "agent_type": data.get("agent_type"),
+                        "status": data.get("status"),
+                        "total_tokens": data.get("total_tokens"),
+                        "total_tool_uses": data.get("total_tool_uses"),
+                        "duration_ms": data.get("duration_ms"),
+                    },
+                    metadata={
+                        "type": "agent_result",
+                        "agent_type": data.get("agent_type"),
+                        "total_tokens": data.get("total_tokens"),
+                        "total_tool_uses": data.get("total_tool_uses"),
+                        "duration_ms": data.get("duration_ms"),
+                        "usage": data.get("usage", {}),
+                    },
+                )
+
+        elif kind == "task_started":
+            logger.info(
+                "[trace] Sub-agent started: task_id=%s, type=%s, desc=%s",
+                data.get("task_id", "?"),
+                data.get("task_type"),
+                data.get("description", "")[:80],
+            )
+
+        elif kind == "task_notification":
+            logger.info(
+                "[trace] Sub-agent %s: status=%s, tokens=%s, tools=%s, duration=%sms",
+                data.get("task_id", "?"),
+                data.get("status"),
+                data.get("usage", {}).get("total_tokens"),
+                data.get("usage", {}).get("tool_uses"),
+                data.get("usage", {}).get("duration_ms"),
+            )
 
     # Fix #8: guard clause instead of assert
     if proc.stdout is None:
@@ -528,10 +638,8 @@ def _parse_stream(
     proc.wait()
 
     # End any tool spans that never got a result
-    for tool_id, span_id in tool_span_map.items():
-        matched = any(r.get("tool_use_id") == tool_id for r in state.tool_results)
-        if not matched:
-            tracer.end_span(span_id, trace_id=trace_id)
+    for span_id in tool_span_map.values():
+        tracer.end_span(span_id, trace_id=trace_id)
 
     if not state.response:
         state.response = "..."

@@ -10,7 +10,13 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from bike_shop.providers.claude import ClaudeProvider, _parse_response, _parse_stream
+from bike_shop.providers.claude import (
+    ClaudeProvider,
+    _handle_event,
+    _ParseState,
+    _parse_response,
+    _parse_stream,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +232,89 @@ class TestParseStream:
 
         response, _, _ = _parse_stream(proc, tracer, "t1", "g1")
         assert response == "..."
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent event parsing
+# ---------------------------------------------------------------------------
+
+
+class TestUserToolResult:
+    def test_user_tool_result(self) -> None:
+        event = {"type": "user", "message": {"content": [{"tool_use_id": "abc", "type": "tool_result", "content": [{"type": "text", "text": "OK"}]}]}}
+        state = _ParseState()
+        _handle_event(event, state)
+        assert len(state.tool_results) == 1
+        assert "OK" in state.tool_results[0]["content"]
+
+    def test_error_content(self) -> None:
+        event = {"type": "user", "message": {"content": [{"tool_use_id": "e", "type": "tool_result", "content": "err", "is_error": True}]}}
+        state = _ParseState()
+        _handle_event(event, state)
+        assert state.tool_results[0]["is_error"] is True
+
+    def test_span_without_agent(self) -> None:
+        event = {"type": "user", "message": {"content": [{"tool_use_id": "t", "type": "tool_result", "content": [{"type": "text", "text": "ok"}]}]}}
+        state = _ParseState()
+        spans = []
+        _handle_event(event, state, on_span=lambda k, d, s: spans.append((k, d)))
+        assert spans[0][0] == "tool_result"
+
+    def test_skip_span_with_agent(self) -> None:
+        event = {"type": "user", "message": {"content": [{"tool_use_id": "a", "type": "tool_result", "content": [{"type": "text", "text": "d"}]}]}, "tool_use_result": {"status": "completed", "agentType": "gp", "totalTokens": 5000, "totalToolUseCount": 2, "totalDurationMs": 1200, "usage": {}}}
+        state = _ParseState()
+        spans = []
+        _handle_event(event, state, on_span=lambda k, d, s: spans.append((k, d)))
+        assert "tool_result" not in [s[0] for s in spans]
+        assert "agent_result" in [s[0] for s in spans]
+
+    def test_agent_metadata(self) -> None:
+        event = {"type": "user", "message": {"content": [{"tool_use_id": "m", "type": "tool_result", "content": [{"type": "text", "text": "ok"}]}]}, "tool_use_result": {"status": "completed", "agentType": "gp", "totalTokens": 10091, "totalToolUseCount": 3, "totalDurationMs": 1359, "usage": {}}}
+        state = _ParseState()
+        spans = []
+        _handle_event(event, state, on_span=lambda k, d, s: spans.append((k, d)))
+        d = [s[1] for s in spans if s[0] == "agent_result"][0]
+        assert d["total_tokens"] == 10091
+
+
+class TestTaskLifecycleEvents:
+    def test_task_started(self) -> None:
+        event = {"type": "system", "subtype": "task_started", "task_id": "t1", "tool_use_id": "tu1", "task_type": "local_agent", "description": "X", "prompt": "Y"}
+        state = _ParseState()
+        spans = []
+        _handle_event(event, state, on_span=lambda k, d, s: spans.append((k, d)))
+        assert spans[0][0] == "task_started"
+
+    def test_task_notification(self) -> None:
+        event = {"type": "system", "subtype": "task_notification", "task_id": "t1", "tool_use_id": "tu1", "status": "completed", "usage": {"total_tokens": 10088}}
+        state = _ParseState()
+        spans = []
+        _handle_event(event, state, on_span=lambda k, d, s: spans.append((k, d)))
+        assert spans[0][0] == "task_notification"
+
+    def test_noop(self) -> None:
+        _handle_event({"type": "system", "subtype": "task_started", "task_id": "t"}, _ParseState())
+
+
+class TestStreamAgentResultSpans:
+    def _proc(self, lines, rc=0):
+        p = MagicMock()
+        p.stdout = StringIO("\n".join(lines) + "\n")
+        p.stderr = StringIO("")
+        p.wait.return_value = rc
+        p.returncode = rc
+        return p
+
+    def test_closes_span(self) -> None:
+        tracer = MagicMock()
+        tracer.start_span.return_value = "sp"
+        lines = [
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "ag", "name": "Agent", "input": {}}, {"type": "text", "text": "D"}], "usage": {}}}),
+            json.dumps({"type": "user", "message": {"content": [{"tool_use_id": "ag", "type": "tool_result", "content": [{"type": "text", "text": "ok"}]}]}, "tool_use_result": {"status": "completed", "agentType": "gp", "totalTokens": 5000, "totalToolUseCount": 1, "totalDurationMs": 800, "usage": {}}}),
+        ]
+        r, _, _ = _parse_stream(self._proc(lines), tracer, "t1", "g1")
+        assert r == "D"
+        assert any("agent_result" in str(c) for c in tracer.end_span.call_args_list)
 
 
 # ---------------------------------------------------------------------------
