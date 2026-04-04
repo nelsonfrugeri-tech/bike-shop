@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Router simplified** — removed LLM call from SemanticRouter (#37). Claude Code now decides expert selection, model choice, and memory lookups via Agent tool. Router is now a lightweight passthrough that resolves project context. Eliminates 10-23s latency per message.
+- **Agents as orchestrators** — all agents (Mr. Robot, Elliot, Tyrell) now delegate tasks to specialized experts via Agent tool instead of being pre-assigned by the router
+
 ### Fixed
 - **Per-project Tracer propagation to provider** — `_call_llm_batch` now resolves the per-project `Tracer` and passes it to `provider.call()`, fixing a `NameError` where the undefined `tracer` variable was referenced (#33)
 - **Cross-project session resume** — `SessionStore.get()` now validates `project_id` before resuming, preventing Claude CLI crash (rc=1) when agents switch between projects

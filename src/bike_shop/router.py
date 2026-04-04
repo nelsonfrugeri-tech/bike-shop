@@ -1,53 +1,16 @@
 from __future__ import annotations
 
 import glob
-import json
 import logging
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 
 from bike_shop.config import MODEL_MAP
-from bike_shop.memory_schema import scopes_description, types_description
 from bike_shop.observability import Tracer
 
 logger = logging.getLogger(__name__)
-
-ROUTER_MODEL = os.environ.get("ROUTER_MODEL", "claude-sonnet-4-20250514")
-
-_ROUTER_PROMPT_TEMPLATE = """You are a semantic router. Analyze the user message and the thread context to decide:
-1. Which specialized agent should handle this task
-2. Which model (complexity level) should power it
-3. Whether long-term memory should be consulted
-
-Available agents:
-{agent_list}
-- none: simple questions, confirmations, short answers, status checks
-
-Model selection rules:
-- opus: deep thinking, complex architecture, difficult debugging, multi-step reasoning, long feature development, deep research
-- sonnet: standard coding, reviews, implementation, moderate tasks
-- haiku: ONLY for truly standalone simple questions with no ongoing task context
-
-IMPORTANT: Consider the thread context. If there is an ongoing complex task (implementation, architecture, review),
-maintain the appropriate model even if the current message is simple (e.g. "how's it going?" in an implementation
-thread should keep sonnet/opus, not downgrade to haiku).
-
-Memory lookup: If the message references or requires knowledge about past decisions, team preferences, procedures,
-facts, or outcomes from OTHER conversations, request a memory lookup. Each lookup specifies:
-- query: what to search for (concise, specific)
-- scopes: which scopes to search — {scopes}
-- types: which memory types to filter — {types}
-
-Return an EMPTY "memory" array if the message is self-contained and doesn't need cross-thread context.
-
-Respond ONLY with valid JSON, nothing else:
-{{"agent": "name_or_none", "model": "opus|sonnet|haiku", "reason": "brief explanation", "memory": [{{"query": "search text", "scopes": ["project"], "types": ["decision"]}}]}}
-{thread_context}
-User message:
-"""
 
 
 def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
@@ -76,7 +39,7 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
 
     # Extract description (may be multi-line folded with >)
     desc_match = re.search(
-        r"^description:\s*>?\s*\n((?:\s{2,}.+\n?)+)", fm, re.MULTILINE
+        r"^description:\s*[>|]?\s*\n((?:\s{2,}.+\n?)+)", fm, re.MULTILINE
     )
     if desc_match:
         desc_lines = desc_match.group(1).strip().splitlines()
@@ -102,7 +65,11 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
 
 
 class SemanticRouter:
-    """Classifies messages and selects the right expert + model."""
+    """Lightweight passthrough router + expert registry.
+
+    Discovers available experts from disk but does NOT call any LLM.
+    Claude Code decides expert selection and model choice via Agent tool.
+    """
 
     EXPERTS_DIR = os.getenv(
         "EXPERTS_DIR",
@@ -146,20 +113,12 @@ class SemanticRouter:
             )
         return experts
 
-    def _build_prompt(self, experts: dict[str, str], thread_context: str = "") -> str:
-        """Build the router prompt dynamically from discovered experts."""
-        agent_lines = "\n".join(
-            f"- {name}: {desc}" for name, desc in sorted(experts.items())
-        )
-        ctx = ""
-        if thread_context:
-            ctx = f"\nThread context (recent messages):\n{thread_context}\n\n"
-        return _ROUTER_PROMPT_TEMPLATE.format(
-            agent_list=agent_lines,
-            thread_context=ctx,
-            scopes=scopes_description(),
-            types=types_description(),
-        )
+    def get_experts_description(self) -> str:
+        """Format expert list for injection into agent system prompts."""
+        if not self._experts:
+            return ""
+        lines = [f"- {name}: {desc}" for name, desc in sorted(self._experts.items())]
+        return "\n".join(lines)
 
     def route(
         self,
@@ -169,118 +128,35 @@ class SemanticRouter:
         trace_id: str | None = None,
         parent_span_id: str | None = None,
     ) -> dict:
-        """Classify a message. Returns {"agent": str|None, "model": str, "reason": str}."""
+        """Preprocess message — no LLM call. Claude Code decides expert/model."""
         start = time.time()
-        prompt = self._build_prompt(self._experts, thread_context)
 
-        # Create a generation span for the router LLM call
-        gen_id: str | None = None
         if trace_id:
-            gen_id = self._tracer.start_generation(
-                "router.llm",
+            span_id = self._tracer.start_span(
+                "router.passthrough",
                 trace_id=trace_id,
-                model=ROUTER_MODEL,
-                input=message[:300],
                 parent_id=parent_span_id,
+                input={"message": message[:300]},
+            )
+            self._tracer.end_span(
+                span_id,
+                trace_id=trace_id,
+                output={
+                    "decision": "passthrough",
+                    "available_experts": list(self._experts.keys()),
+                },
             )
 
-        try:
-            # Pass prompt via stdin to avoid CLI arg size limits and shell escaping
-            result = subprocess.run(
-                [
-                    "claude", "-p", "-",
-                    "--model", ROUTER_MODEL,
-                    "--dangerously-skip-permissions",
-                    "--output-format", "text",
-                    "--max-turns", "1",
-                ],
-                input=prompt + message,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                # The router only classifies messages — it never writes files.
-                # Using AGENT_WORKSPACE directly (the main repo) is safe here
-                # because no uncommitted changes are introduced by routing.
-                # Agent handlers use isolated worktrees for all write operations.
-                cwd=os.environ.get("AGENT_WORKSPACE", os.path.expanduser("~")),
-            )
+        duration_ms = (time.time() - start) * 1000
+        logger.info(
+            "[router] passthrough (%.0fms) — Claude Code will decide expert/model",
+            duration_ms,
+        )
 
-            duration_ms = (time.time() - start) * 1000
-            raw = result.stdout.strip()
-
-            # Parse JSON from response
-            # Handle cases where response has markdown code blocks
-            if "```" in raw:
-                raw = raw.split("```json")[-1].split("```")[0].strip()
-                if not raw:
-                    raw = result.stdout.strip().split("```")[-2].strip()
-
-            decision = json.loads(raw)
-
-            # Normalize
-            agent = decision.get("agent", "none")
-            if agent == "none" or agent == "null" or not agent:
-                agent = None
-            elif agent not in self._validated_experts:
-                logger.warning("[router] Expert '%s' not found on disk — falling back to direct mode", agent)
-                agent = None
-
-            model = decision.get("model", "sonnet")
-            if model not in MODEL_MAP:
-                model = "sonnet"
-
-            reason = decision.get("reason", "")
-            memory = decision.get("memory", [])
-            model_id = MODEL_MAP[model]
-
-            # Validate memory requests
-            if not isinstance(memory, list):
-                memory = []
-            memory = [
-                m for m in memory
-                if isinstance(m, dict) and m.get("query")
-            ]
-
-            logger.info(
-                "[router] agent=%s model=%s memory_lookups=%d reason=%s (%.0fms)",
-                agent or "direct", model, len(memory), reason, duration_ms,
-            )
-
-            # End generation span if hierarchical tracing
-            if gen_id and trace_id:
-                self._tracer.end_generation(
-                    gen_id,
-                    trace_id=trace_id,
-                    output=json.dumps({"agent": agent, "model": model, "reason": reason}),
-                    metadata={"duration_ms": round(duration_ms)},
-                )
-            else:
-                # Backwards-compat: standalone trace for router calls without parent
-                self._tracer.trace_call(
-                    user_message=message[:300],
-                    response=json.dumps({"agent": agent, "model": model, "reason": reason, "memory": memory}),
-                    model=ROUTER_MODEL,
-                    duration_ms=duration_ms,
-                    input_tokens=None,
-                    output_tokens=None,
-                    tools=[],
-                    tool_results=[],
-                    thinking=[],
-                    errors=[],
-                )
-
-            return {"agent": agent, "model": model_id, "model_name": model, "reason": reason, "memory": memory}
-
-        except (json.JSONDecodeError, subprocess.TimeoutExpired, Exception) as e:
-            duration_ms = (time.time() - start) * 1000
-            logger.warning("[router] Failed to classify (%.0fms): %s — defaulting to sonnet", duration_ms, e)
-
-            if gen_id and trace_id:
-                self._tracer.end_generation(
-                    gen_id, trace_id=trace_id,
-                    output=str(e), metadata={"error": True},
-                )
-            else:
-                self._tracer.trace_error(error=str(e), context=message[:300])
-
-            return {"agent": None, "model": MODEL_MAP["sonnet"], "model_name": "sonnet", "reason": "router_fallback", "memory": []}
+        return {
+            "agent": None,
+            "model": MODEL_MAP["sonnet"],
+            "model_name": "sonnet",
+            "reason": "passthrough — Claude Code decides",
+            "memory": [],
+        }
