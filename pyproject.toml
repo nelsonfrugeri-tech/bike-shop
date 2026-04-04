@@ -12,6 +12,7 @@ dependencies = [
     "langfuse==4.0.1",
     "mem0ai==1.0.9",
     "ollama==0.6.1",
+    "PyYAML==6.0.1",
 ]
 
 [build-system]
