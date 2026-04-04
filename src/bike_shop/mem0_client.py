@@ -1,4 +1,7 @@
-"""Lazy singleton Mem0 client with graceful degradation."""
+"""Lazy Mem0 client pool with graceful degradation.
+
+Supports multiple collections (one per project) via a dict of singletons.
+"""
 
 from __future__ import annotations
 
@@ -7,15 +10,14 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Lazy-loaded Mem0 client
-_mem0 = None
+# Lazy-loaded Mem0 clients keyed by collection name
+_mem0_clients: dict[str, object] = {}
 
 
-def get_mem0():
-    """Get or create a Mem0 client. Returns None if not configured."""
-    global _mem0
-    if _mem0 is not None:
-        return _mem0
+def get_mem0(collection_name: str = "bike-shop-memory") -> object | None:
+    """Get or create a Mem0 client for the given collection. Returns None if not configured."""
+    if collection_name in _mem0_clients:
+        return _mem0_clients[collection_name]
 
     qdrant_host = os.environ.get("QDRANT_HOST", "localhost")
     qdrant_port = int(os.environ.get("QDRANT_PORT", "6333"))
@@ -31,7 +33,7 @@ def get_mem0():
                 "config": {
                     "host": qdrant_host,
                     "port": qdrant_port,
-                    "collection_name": "bike-shop-memory",
+                    "collection_name": collection_name,
                     "embedding_model_dims": 768,
                 },
             },
@@ -54,18 +56,21 @@ def get_mem0():
                 },
             }
 
-        _mem0 = Memory.from_config(config)
-        logger.info("Mem0 connected (qdrant=%s:%d, ollama=%s)", qdrant_host, qdrant_port, ollama_url)
-        return _mem0
+        client = Memory.from_config(config)
+        _mem0_clients[collection_name] = client
+        logger.info(
+            "Mem0 connected (collection=%s, qdrant=%s:%d, ollama=%s)",
+            collection_name, qdrant_host, qdrant_port, ollama_url,
+        )
+        return client
     except ImportError:
         logger.warning("mem0ai not installed — memory agent disabled")
         return None
     except Exception as e:
-        logger.error("Failed to connect Mem0: %s", e)
+        logger.error("Failed to connect Mem0 (collection=%s): %s", collection_name, e)
         return None
 
 
 def reset_mem0() -> None:
-    """Reset singleton for testing."""
-    global _mem0
-    _mem0 = None
+    """Reset all singletons for testing."""
+    _mem0_clients.clear()

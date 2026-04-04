@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Multi-project support** — agents can work on multiple repos from a single platform
+  - `projects.yaml` config file maps Slack channels to projects with per-project repo paths, worktree dirs, Mem0 collections, and Langfuse keys
+  - `ProjectConfig` (frozen dataclass) carries all project-specific settings
+  - `ProjectRegistry` loads and indexes projects by ID and Slack channel
+  - `ProjectResolver` resolves channel/thread to project: channel mapping -> thread inheritance -> default fallback
+  - `SessionStore` tracks `project_id` per thread for cross-message continuity
+  - `get_mem0()` supports multiple Qdrant collections (dict of singletons)
+  - `MemoryAgent` accepts `mem0_collection` parameter for per-project memory isolation
+  - `Tracer` accepts per-project Langfuse keys via constructor
+  - `ensure_worktree()` and `create_worktree()` accept `repo_path`/`worktree_dir` overrides with env var fallback
+  - Handler creates per-project `MemoryAgent` and `Tracer` instances lazily
+  - 21 new tests covering registry, resolver, session project_id, multi-collection Mem0, and worktree overrides
+  - Full backwards compatibility: all changes use optional params with env var fallbacks
+
 ### Removed
 - `memory-keeper` MCP server — replaced by Mem0 (Qdrant + Ollama) since v0.2.0
 

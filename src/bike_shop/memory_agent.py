@@ -29,9 +29,15 @@ class MemoryAgent:
         Agent:   "{agent_key}:{project_id}" — agent's own implementation decisions
     """
 
-    def __init__(self, agent_key: str, project_id: str = "bike-shop") -> None:
+    def __init__(
+        self,
+        agent_key: str,
+        project_id: str = "bike-shop",
+        mem0_collection: str = "bike-shop-memory",
+    ) -> None:
         self._agent_key = agent_key
         self._project_id = project_id
+        self._mem0_collection = mem0_collection
         self._tracer = Tracer(f"memory-{agent_key}")
 
         # Mem0 scoped user_ids
@@ -40,12 +46,12 @@ class MemoryAgent:
         self._uid_agent = f"{agent_key}:{project_id}"
 
         self._mem0_enabled = False
-        mem0 = get_mem0()
+        mem0 = get_mem0(collection_name=mem0_collection)
         if mem0:
             self._mem0_enabled = True
             logger.info(
-                "MemoryAgent enabled for agent='%s' project='%s'",
-                agent_key, project_id,
+                "MemoryAgent enabled for agent='%s' project='%s' collection='%s'",
+                agent_key, project_id, mem0_collection,
             )
 
     def _scope_to_user_id(self, scope: str) -> str:
@@ -75,7 +81,7 @@ class MemoryAgent:
         if not self._mem0_enabled:
             return ""
 
-        mem0 = get_mem0()
+        mem0 = get_mem0(collection_name=self._mem0_collection)
         if not mem0:
             return ""
 
@@ -150,7 +156,7 @@ class MemoryAgent:
         if not self._mem0_enabled or not memory_requests:
             return ""
 
-        mem0 = get_mem0()
+        mem0 = get_mem0(collection_name=self._mem0_collection)
         if not mem0:
             return ""
 

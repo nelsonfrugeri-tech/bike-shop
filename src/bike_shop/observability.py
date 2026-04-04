@@ -182,9 +182,24 @@ class Tracer:
     - Graceful degradation when Langfuse is unavailable
     """
 
-    def __init__(self, agent_name: str) -> None:
+    def __init__(
+        self,
+        agent_name: str,
+        langfuse_public_key: str | None = None,
+        langfuse_secret_key: str | None = None,
+    ) -> None:
         self._agent_name = agent_name
-        self._enabled = _get_config() is not None and _parse_detail() != TraceDetail.OFF
+        self._custom_config: tuple[str, str] | None = None
+
+        if langfuse_public_key and langfuse_secret_key:
+            host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
+            credentials = b64encode(
+                f"{langfuse_public_key}:{langfuse_secret_key}".encode()
+            ).decode()
+            self._custom_config = (host, f"Basic {credentials}")
+
+        config = self._custom_config or _get_config()
+        self._enabled = config is not None and _parse_detail() != TraceDetail.OFF
         if self._enabled:
             logger.info("[%s] Langfuse tracing enabled (detail=%s)", agent_name, TRACE_DETAIL)
 

@@ -85,7 +85,7 @@ class TestEnsureWorktree:
         ):
             path = ensure_worktree("elliot")
 
-        mock_create.assert_called_once_with("elliot-default", base_branch="main")
+        mock_create.assert_called_once_with("elliot-default", base_branch="main", repo_path=None, worktree_dir=None)
         assert path == str(tmp_path / "elliot-default")
 
     @patch("bike_shop.worktree.create_worktree")
@@ -100,7 +100,7 @@ class TestEnsureWorktree:
         ):
             ensure_worktree("elliot", task_id="funds-abc")
 
-        mock_create.assert_called_once_with("elliot-funds-abc", base_branch="main")
+        mock_create.assert_called_once_with("elliot-funds-abc", base_branch="main", repo_path=None, worktree_dir=None)
 
     def test_raises_when_worktree_dir_not_set(self, tmp_path) -> None:
         """ensure_worktree must raise (not return None) when env is missing."""

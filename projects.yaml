@@ -1,0 +1,26 @@
+default_project: market-analysis
+
+projects:
+  market-analysis:
+    display_name: "Market Analysis"
+    repo_path: "${MARKET_ANALYSIS_REPO_PATH}"
+    worktree_dir: "${MARKET_ANALYSIS_WORKTREE_DIR}"
+    github_repo: "nelsonfrugeri-tech/market-analysis"
+    mem0_collection: "market-analysis-memory"
+    langfuse_tags: ["market-analysis"]
+    langfuse_public_key: "pk-lf-ba748bd3-48ff-401b-9476-b1582d53d517"
+    langfuse_secret_key: "sk-lf-aaf402e5-6909-4d04-b7e6-4fcbe0cdbdb5"
+    mcp_config: null
+    slack_channels: []
+
+  autarch:
+    display_name: "Autarch"
+    repo_path: "${AUTARCH_REPO_PATH}"
+    worktree_dir: "${AUTARCH_WORKTREE_DIR}"
+    github_repo: "nelsonfrugeri-tech/autarch"
+    mem0_collection: "autarch-memory"
+    langfuse_tags: ["autarch"]
+    langfuse_public_key: "pk-lf-2c7781f5-cc2e-4f31-9741-aa49eb371a9e"
+    langfuse_secret_key: "sk-lf-e9686ead-0b04-40fc-a03d-1470ca449be6"
+    mcp_config: null
+    slack_channels: []

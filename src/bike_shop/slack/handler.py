@@ -18,6 +18,7 @@ from bike_shop.github_auth import GitHubAuth
 from bike_shop.memory_agent import MemoryAgent
 from bike_shop.model_switch import ModelSwitcher
 from bike_shop.observability import Tracer
+from bike_shop.project import ProjectConfig, ProjectRegistry, ProjectResolver
 from bike_shop.providers import LLMProvider
 from bike_shop.router import SemanticRouter
 from bike_shop.session import SessionStore
@@ -174,29 +175,95 @@ def _build_batch_prompt(config: AgentConfig, context: str,
 class SlackAgentHandler:
     """Wires a single agent to Slack via Socket Mode."""
 
-    def __init__(self, config: AgentConfig, provider: LLMProvider) -> None:
+    def __init__(
+        self,
+        config: AgentConfig,
+        provider: LLMProvider,
+        project_registry: ProjectRegistry | None = None,
+    ) -> None:
         self._config = config
         self._provider = provider
         self._session = SessionStore(config.agent_key)
         self._github = GitHubAuth(config)
         self._switcher = ModelSwitcher()
         self._router = SemanticRouter()
+        self._project_registry = project_registry
+
+        # Default memory agent and tracer (used when no project is resolved)
         self._memory_agent = MemoryAgent(agent_key=config.agent_key)
         self._tracer = Tracer(config.name)
         self._accumulator = MessageAccumulator(flush_callback=self._on_batch_flush)
+
+        # Per-project memory agents and tracers (lazy-created)
+        self._memory_agents: dict[str, MemoryAgent] = {}
+        self._tracers: dict[str, Tracer] = {}
+
+        # Project resolver (lazy-created when registry is available)
+        self._resolver: ProjectResolver | None = None
+        if project_registry:
+            self._resolver = ProjectResolver(project_registry, self._session)
 
         # Stash say/client per thread for batch callback
         self._thread_context: dict[str, dict[str, Any]] = {}
         self._thread_context_lock = threading.Lock()
 
-    def _get_workspace(self, task_id: str | None = None) -> str:
+    def _resolve_project(self, channel: str, thread_ts: str | None = None) -> ProjectConfig | None:
+        """Resolve channel/thread to a ProjectConfig, or None if no registry."""
+        if not self._resolver:
+            return None
+        try:
+            return self._resolver.resolve(channel, thread_ts)
+        except ValueError:
+            logger.warning("[%s] Failed to resolve project for channel=%s", self._config.name, channel)
+            return None
+
+    def _get_memory_agent(self, project: ProjectConfig | None = None) -> MemoryAgent:
+        """Get a MemoryAgent for the given project, or the default one."""
+        if not project:
+            return self._memory_agent
+        pid = project.project_id
+        if pid not in self._memory_agents:
+            self._memory_agents[pid] = MemoryAgent(
+                agent_key=self._config.agent_key,
+                project_id=pid,
+                mem0_collection=project.mem0_collection,
+            )
+        return self._memory_agents[pid]
+
+    def _get_tracer(self, project: ProjectConfig | None = None) -> Tracer:
+        """Get a Tracer for the given project, or the default one."""
+        if not project:
+            return self._tracer
+        pid = project.project_id
+        if pid not in self._tracers:
+            self._tracers[pid] = Tracer(
+                self._config.name,
+                langfuse_public_key=project.langfuse_public_key,
+                langfuse_secret_key=project.langfuse_secret_key,
+            )
+        return self._tracers[pid]
+
+    def _get_workspace(
+        self,
+        task_id: str | None = None,
+        project: ProjectConfig | None = None,
+    ) -> str:
         """Get or create an isolated worktree for this agent.
+
+        Args:
+            task_id: Optional task suffix for the worktree name.
+            project: ProjectConfig with repo_path/worktree_dir overrides.
 
         Raises:
             RuntimeError: If worktree creation fails. Worktrees are mandatory;
                           there is no fallback to a shared directory.
         """
-        return ensure_worktree(self._config.agent_key, task_id=task_id)
+        return ensure_worktree(
+            self._config.agent_key,
+            task_id=task_id,
+            repo_path=project.repo_path if project else None,
+            worktree_dir=project.worktree_dir if project else None,
+        )
 
     def _call_llm(self, context: str, question: str, thread_ts: str,
                   model_override: str | None = None, agent_override: str | None = None,
@@ -205,10 +272,12 @@ class SlackAgentHandler:
                   memory_requests: list[Any] | None = None,
                   workspace: str | None = None,
                   trace_id: str | None = None,
-                  parent_span_id: str | None = None) -> str:
+                  parent_span_id: str | None = None,
+                  project: ProjectConfig | None = None) -> str:
         """Call the LLM provider and handle session tracking."""
         config = self._config
-        tracer = self._tracer
+        tracer = self._get_tracer(project)
+        memory_agent = self._get_memory_agent(project)
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
@@ -219,12 +288,12 @@ class SlackAgentHandler:
             input={"question": question[:300]},
         ) if trace_id else None
 
-        shared_memory = self._memory_agent.recall(
+        shared_memory = memory_agent.recall(
             question, has_session=session_id is not None,
             trace_id=trace_id, parent_span_id=memory_span_id,
         )
         if memory_requests:
-            filtered = self._memory_agent.recall_filtered(
+            filtered = memory_agent.recall_filtered(
                 memory_requests,
                 trace_id=trace_id, parent_span_id=memory_span_id,
             )
@@ -249,7 +318,7 @@ class SlackAgentHandler:
 
         # Get worktree workspace if not provided
         if workspace is None:
-            workspace = self._get_workspace()
+            workspace = self._get_workspace(project=project)
 
         # LLM call span
         llm_span_id = tracer.start_span(
@@ -278,27 +347,32 @@ class SlackAgentHandler:
                             output=response[:200] if response else "")
 
         if new_session_id and thread_ts:
-            self._session.store(thread_ts, new_session_id)
+            self._session.store(
+                thread_ts, new_session_id,
+                project_id=project.project_id if project else None,
+            )
 
         return response
 
     def _call_llm_batch(self, context: str, messages: list[dict[str, Any]],
                         thread_ts: str, workspace: str | None = None,
-                        trace_id: str | None = None) -> str:
+                        trace_id: str | None = None,
+                        project: ProjectConfig | None = None) -> str:
         """Call LLM with a batch of messages."""
         config = self._config
+        memory_agent = self._get_memory_agent(project)
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
         session_id = self._session.get(thread_ts)
 
         # Combine message texts for memory lookup
         combined_text = " ".join(m.get("text", "") for m in messages)
-        shared_memory = self._memory_agent.recall(combined_text, has_session=session_id is not None)
+        shared_memory = memory_agent.recall(combined_text, has_session=session_id is not None)
 
         prompt = _build_batch_prompt(config, context, messages, github_token, shared_memory)
 
         if workspace is None:
-            workspace = self._get_workspace()
+            workspace = self._get_workspace(project=project)
 
         response, new_session_id = self._provider.call(
             config,
@@ -314,7 +388,10 @@ class SlackAgentHandler:
         )
 
         if new_session_id and thread_ts:
-            self._session.store(thread_ts, new_session_id)
+            self._session.store(
+                thread_ts, new_session_id,
+                project_id=project.project_id if project else None,
+            )
 
         return response
 
@@ -323,7 +400,9 @@ class SlackAgentHandler:
                            channel: str = "", user_name: str = "") -> None:
         """Process single message LLM call in background thread and reply when done."""
         config = self._config
-        tracer = self._tracer
+        project = self._resolve_project(channel, thread_ts)
+        tracer = self._get_tracer(project)
+        memory_agent = self._get_memory_agent(project)
         try:
             # Start top-level trace for this message
             trace_id = tracer.start_trace(
@@ -377,7 +456,8 @@ class SlackAgentHandler:
                                                 "agent": agent_override},
                                    channel=channel,
                                    memory_requests=memory_requests,
-                                   trace_id=trace_id)
+                                   trace_id=trace_id,
+                                   project=project)
 
             if self._switcher.has_marker(reply):
                 if not self._switcher.should_escalate(thread_ts):
@@ -390,7 +470,8 @@ class SlackAgentHandler:
                     reply = self._call_llm(context, question, thread_ts,
                                            model_override=config.opus_model_id,
                                            channel=channel,
-                                           trace_id=trace_id)
+                                           trace_id=trace_id,
+                                           project=project)
                     reply = self._switcher.strip_marker(reply)
 
             logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
@@ -400,7 +481,7 @@ class SlackAgentHandler:
             observe_span = tracer.start_span("memory.observe", trace_id=trace_id,
                                                 input={"question": question[:200],
                                                        "reply": reply[:200]})
-            self._memory_agent.observe(
+            memory_agent.observe(
                 config.name, question, reply,
                 trace_id=trace_id,
                 parent_span_id=observe_span,
@@ -465,7 +546,9 @@ class SlackAgentHandler:
                        thread_ts: str, channel: str) -> None:
         """Process a batch of messages with a single consolidated LLM call."""
         config = self._config
-        tracer = self._tracer
+        project = self._resolve_project(channel, thread_ts)
+        tracer = self._get_tracer(project)
+        memory_agent = self._get_memory_agent(project)
         try:
             context = get_thread_context(client, channel, thread_ts)
             if not context:
@@ -481,13 +564,13 @@ class SlackAgentHandler:
 
             say(f"_(Processing {len(messages)} tasks...)_", thread_ts=thread_ts)
 
-            reply = self._call_llm_batch(context, messages, thread_ts, trace_id=trace_id)
+            reply = self._call_llm_batch(context, messages, thread_ts, trace_id=trace_id, project=project)
 
             logger.info("[%s] Batch replied (%d chars): %s", config.name, len(reply), reply[:80])
 
             # Observe combined exchange
             combined = " | ".join(m.get("text", "") for m in messages)
-            self._memory_agent.observe(config.name, combined, reply)
+            memory_agent.observe(config.name, combined, reply)
 
             self._post_reply(say, reply, thread_ts, tracer=tracer, trace_id=trace_id)
 
