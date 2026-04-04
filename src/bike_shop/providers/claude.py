@@ -276,7 +276,8 @@ class ClaudeProvider(LLMProvider):
             duration_ms = (time.time() - start_time) * 1000
 
             if result.returncode != 0:
-                logger.error("Claude CLI failed (rc=%d): %s", result.returncode, result.stderr.strip())
+                logger.error("Claude CLI failed (rc=%d) stderr=%s stdout=%s",
+                             result.returncode, result.stderr.strip()[:500], result.stdout.strip()[:500])
                 tracer.trace_error(error=result.stderr.strip()[:500], context=prompt[-500:])
 
             response, new_session_id, usage = _parse_response(result.stdout)

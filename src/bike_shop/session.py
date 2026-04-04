@@ -29,7 +29,7 @@ class SessionStore:
         with open(self._path, "w") as f:
             json.dump(sessions, f)
 
-    def get(self, thread_ts: str) -> str | None:
+    def get(self, thread_ts: str, project_id: str | None = None) -> str | None:
         sessions = self._load()
         entry = sessions.get(thread_ts)
         if not entry:
@@ -37,6 +37,10 @@ class SessionStore:
         if time.time() - entry.get("ts", 0) > SESSION_TTL:
             sessions.pop(thread_ts, None)
             self._save(sessions)
+            return None
+        # Don't resume sessions from a different project
+        stored_project = entry.get("project_id")
+        if project_id and stored_project and stored_project != project_id:
             return None
         return entry.get("session_id")
 
