@@ -394,11 +394,16 @@ class ClaudeProvider(LLMProvider):
         proc: subprocess.Popen[str] | None = None
         last_activity_ref: list[float] = [time.monotonic()]
         stop_event = threading.Event()
-        kill_reason: str | None = None
+        # list[str|None] for thread-safe cross-thread access (same pattern as last_activity_ref)
+        kill_reason_ref: list[str | None] = [None]
 
         def _streaming_watchdog() -> None:
-            """Monitor idle and absolute timeout for streaming mode."""
-            nonlocal kill_reason
+            """Monitor idle and absolute timeout for streaming mode.
+
+            Note: if _parse_stream raises at the same moment the watchdog kills,
+            both paths call _graceful_kill. This is safe — _graceful_kill handles
+            ProcessLookupError for already-dead processes.
+            """
             wd_start = time.monotonic()
             while not stop_event.wait(timeout=1.0):
                 now = time.monotonic()
@@ -406,7 +411,7 @@ class ClaudeProvider(LLMProvider):
                 total_elapsed = now - wd_start
 
                 if total_elapsed >= MAX_ABSOLUTE_TIMEOUT:
-                    kill_reason = "absolute_timeout"
+                    kill_reason_ref[0] = "absolute_timeout"
                     logger.warning(
                         "[%s] Streaming process hit absolute timeout (%ds) -- killing",
                         config.name, MAX_ABSOLUTE_TIMEOUT,
@@ -417,7 +422,7 @@ class ClaudeProvider(LLMProvider):
                     return
 
                 if idle_elapsed >= IDLE_TIMEOUT:
-                    kill_reason = "idle"
+                    kill_reason_ref[0] = "idle"
                     logger.warning(
                         "[%s] Streaming process idle for %ds -- killing",
                         config.name, int(idle_elapsed),
@@ -459,6 +464,7 @@ class ClaudeProvider(LLMProvider):
             duration_ms = (time.time() - start_time) * 1000
 
             # If watchdog killed the process, handle timeout
+            kill_reason = kill_reason_ref[0]
             if kill_reason:
                 timeout_seconds = (
                     MAX_ABSOLUTE_TIMEOUT if kill_reason == "absolute_timeout"
@@ -617,6 +623,8 @@ def _parse_stream(
         return "...", None, state.to_usage_dict()
 
     for line in proc.stdout:
+        # Update activity BEFORE strip — even blank lines signal the process
+        # is alive and writing to stdout (not stuck on a blocking command).
         if last_activity_ref is not None:
             last_activity_ref[0] = time.monotonic()
 
