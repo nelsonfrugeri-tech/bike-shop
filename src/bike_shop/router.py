@@ -39,7 +39,7 @@ def _parse_frontmatter(filepath: str) -> tuple[str, str] | None:
 
     # Extract description (may be multi-line folded with >)
     desc_match = re.search(
-        r"^description:\s*>?\s*\n((?:\s{2,}.+\n?)+)", fm, re.MULTILINE
+        r"^description:\s*[>|]?\s*\n((?:\s{2,}.+\n?)+)", fm, re.MULTILINE
     )
     if desc_match:
         desc_lines = desc_match.group(1).strip().splitlines()
