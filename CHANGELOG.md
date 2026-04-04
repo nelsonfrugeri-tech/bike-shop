@@ -13,8 +13,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - **Worktree git diff in Langfuse traces** — after each LLM call, a `worktree.diff` span captures `git diff --stat HEAD` from the agent's worktree, providing visibility into file changes per interaction (#34)
-
-### Added
 - **Multi-project support** — agents can work on multiple repos from a single platform
   - `projects.yaml` config file maps Slack channels to projects with per-project repo paths, worktree dirs, Mem0 collections, and Langfuse keys
   - `ProjectConfig` (frozen dataclass) carries all project-specific settings
