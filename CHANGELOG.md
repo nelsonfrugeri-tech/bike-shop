@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Per-project Langfuse routing** — provider now receives the handler's per-project Tracer instead of creating its own with global keys. All spans (generation, tool, thinking) go to the correct Langfuse project. Re-enabled streaming mode.
 - **Cross-project session resume** — `SessionStore.get()` now validates `project_id` before resuming, preventing Claude CLI crash (rc=1) when agents switch between projects
 
 ### Added
