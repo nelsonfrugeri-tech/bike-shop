@@ -626,13 +626,25 @@ class SlackAgentHandler:
         # Retrieve stashed context
         with self._thread_context_lock:
             ctx = self._thread_context.pop(key, None)
-        if not ctx:
-            logger.warning("[%s] No context for batch key %s", self._config.name, key)
-            return
 
-        say = ctx["say"]
-        client = ctx["client"]
-        channel = ctx["channel"]
+        if ctx:
+            say = ctx["say"]
+            client = ctx["client"]
+            channel = ctx["channel"]
+        else:
+            # Recover from missing context — reconstruct from messages and handler state
+            channel = messages[0].get("channel", "") if messages else ""
+            if not channel:
+                logger.error("[%s] No context and no channel for batch key %s — dropping", self._config.name, key)
+                return
+            logger.warning("[%s] Recovering context for batch key %s from channel=%s", self._config.name, key, channel)
+            client = WebClient(token=self._config.bot_token)
+
+            def say(text: str, thread_ts: str = thread_ts, **kwargs: Any) -> None:
+                try:
+                    client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
+                except Exception as e:
+                    logger.error("[%s] Failed to post recovered message: %s", self._config.name, e)
 
         if len(messages) == 1:
             # Single message — standard flow
