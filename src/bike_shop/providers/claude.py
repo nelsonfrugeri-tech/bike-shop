@@ -181,9 +181,11 @@ class ClaudeProvider(LLMProvider):
         workspace: str | None = None,
         trace_id: str | None = None,
         parent_span_id: str | None = None,
+        tracer: Any | None = None,
     ) -> tuple[str, str | None]:
         model_id = model_override or config.model_id
-        tracer = self._get_tracer(config.name)
+        if tracer is None:
+            tracer = self._get_tracer(config.name)
 
         cmd = [
             "claude", "-p", prompt,
