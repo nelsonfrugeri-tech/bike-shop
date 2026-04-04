@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 from typing import Any
 
@@ -364,6 +365,7 @@ class SlackAgentHandler:
                         project: ProjectConfig | None = None) -> str:
         """Call LLM with a batch of messages."""
         config = self._config
+        tracer = self._get_tracer(project)
         memory_agent = self._get_memory_agent(project)
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
@@ -456,6 +458,9 @@ class SlackAgentHandler:
                 router_model_name = "opus (manual override)"
                 logger.info("[%s] Project lead override -> Opus", config.name)
 
+            # Resolve workspace once — reuse for LLM call and worktree diff
+            workspace = self._get_workspace(project=project)
+
             reply = self._call_llm(context, question, thread_ts,
                                    model_override=model_override,
                                    agent_override=agent_override,
@@ -464,6 +469,7 @@ class SlackAgentHandler:
                                                 "agent": agent_override},
                                    channel=channel,
                                    memory_requests=memory_requests,
+                                   workspace=workspace,
                                    trace_id=trace_id,
                                    project=project)
 
@@ -483,6 +489,32 @@ class SlackAgentHandler:
                     reply = self._switcher.strip_marker(reply)
 
             logger.info("[%s] Replied (%d chars): %s", config.name, len(reply), reply[:80])
+
+            # Worktree diff span — capture git changes made by the agent
+            if workspace and trace_id:
+                try:
+                    diff_result = subprocess.run(
+                        ["git", "diff", "--stat", "HEAD"],
+                        cwd=workspace,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    diff_stat = diff_result.stdout.strip()
+                    if diff_stat:
+                        diff_span = tracer.start_span(
+                            "worktree.diff",
+                            trace_id=trace_id,
+                            input={"workspace": workspace},
+                            metadata={"type": "worktree_diff", "has_changes": True},
+                        )
+                        tracer.end_span(
+                            diff_span,
+                            trace_id=trace_id,
+                            output={"diff_stat": diff_stat},
+                        )
+                except Exception:
+                    pass  # don't fail the message flow for diff capture
 
             # Fix #6: Memory observe — pass observe_span_id to background
             # thread which will close it when the work finishes.
@@ -572,9 +604,40 @@ class SlackAgentHandler:
 
             say(f"_(Processing {len(messages)} tasks...)_", thread_ts=thread_ts)
 
-            reply = self._call_llm_batch(context, messages, thread_ts, trace_id=trace_id, project=project)
+            workspace = self._get_workspace(project=project)
+
+            reply = self._call_llm_batch(
+                context, messages, thread_ts,
+                workspace=workspace, trace_id=trace_id, project=project,
+            )
 
             logger.info("[%s] Batch replied (%d chars): %s", config.name, len(reply), reply[:80])
+
+            # Worktree diff span — capture git changes made by the agent
+            if workspace and trace_id:
+                try:
+                    diff_result = subprocess.run(
+                        ["git", "diff", "--stat", "HEAD"],
+                        cwd=workspace,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    diff_stat = diff_result.stdout.strip()
+                    if diff_stat:
+                        diff_span = tracer.start_span(
+                            "worktree.diff",
+                            trace_id=trace_id,
+                            input={"workspace": workspace},
+                            metadata={"type": "worktree_diff", "has_changes": True},
+                        )
+                        tracer.end_span(
+                            diff_span,
+                            trace_id=trace_id,
+                            output={"diff_stat": diff_stat},
+                        )
+                except Exception:
+                    pass  # don't fail the message flow for diff capture
 
             # Observe combined exchange
             combined = " | ".join(m.get("text", "") for m in messages)
