@@ -12,7 +12,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
 
-from bike_shop.accumulator import MessageAccumulator
+from bike_shop.accumulator import MAX_PARALLEL_AGENTS, MessageAccumulator
 from bike_shop.agents import PROJECT_LEAD
 from bike_shop.config import AgentConfig
 from bike_shop.github_auth import GitHubAuth
@@ -152,6 +152,10 @@ def _build_batch_prompt(config: AgentConfig, context: str,
         text = msg.get("text", "")
         parts.append(f"  {i}. [{user}]: {text}\n")
 
+    parts.append(
+        f"\nIMPORTANT: Spawn at most {MAX_PARALLEL_AGENTS} sub-agents concurrently. "
+        "If there are more tasks than the limit, process them in sequential rounds."
+    )
     parts.append("\n--- END BATCH ---")
 
     return "".join(parts)
