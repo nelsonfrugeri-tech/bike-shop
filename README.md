@@ -612,6 +612,7 @@ Available to all agents via MCP:
 | `AGENT_WORKTREE_DIR` | ✅ | Directory where agent worktrees are created (separate from main repo) |
 | `MSG_BUFFER_WINDOW` | | Seconds to buffer rapid-fire messages (default: `3.0`) |
 | `MAX_BATCH_SIZE` | | Max messages per batch before immediate flush (default: `10`) |
+| `MAX_PARALLEL_AGENTS` | | Max sub-agents spawned concurrently per batch (default: `3`) |
 | `CLAUDE_IDLE_TIMEOUT` | | Kill process after N seconds with no stdout output (default: `300`) |
 | `CLAUDE_MAX_TIMEOUT` | | Absolute safety net — kill no matter what (default: `1800`) |
 | `LANGFUSE_PUBLIC_KEY` | | Langfuse public key for tracing |

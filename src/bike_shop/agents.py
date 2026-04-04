@@ -1,5 +1,7 @@
 import os
 
+from bike_shop.accumulator import MAX_PARALLEL_AGENTS
+
 PROJECT_LEAD = os.environ.get("PROJECT_LEAD_NAME", "the project lead")
 PROJECT_LEAD_SLACK_ID = os.environ.get("PROJECT_LEAD_SLACK_ID", "")
 
@@ -42,6 +44,15 @@ _COMMON_RULES = (
     "- Do NOT tag teammates for: confirmations, status updates, small talk, "
     "or anything that doesn't require their action.\n"
     "- Remember: every message costs tokens. Tag only when it moves work forward.\n\n"
+
+    "## Parallel Execution\n\n"
+    "When you receive a message containing MULTIPLE independent tasks:\n"
+    "- Use the Agent tool to spawn sub-agents for independent tasks\n"
+    "- Each sub-agent runs in an isolated git worktree automatically\n"
+    f"- Spawn at most {MAX_PARALLEL_AGENTS} sub-agents concurrently\n"
+    "- If there are more tasks than the limit, process them in sequential rounds\n"
+    "- For dependent tasks (one needs the output of another), run them sequentially\n"
+    "- For related but independent tasks, run them in parallel\n\n"
 
     "COMMUNICATION:\n"
     "- Be SHORT: 2-3 sentences unless showing code.\n"

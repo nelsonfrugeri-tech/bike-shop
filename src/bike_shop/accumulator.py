@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 BUFFER_WINDOW = float(os.environ.get("MSG_BUFFER_WINDOW", "3.0"))
 MAX_BATCH_SIZE = int(os.environ.get("MAX_BATCH_SIZE", "10"))
+MAX_PARALLEL_AGENTS = int(os.environ.get("MAX_PARALLEL_AGENTS", "3"))
 
 
 class MessageAccumulator:

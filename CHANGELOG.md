@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **MAX_PARALLEL_AGENTS throttle** — new env var (default: `3`) limits how many sub-agents Claude spawns concurrently per batch; injected into batch prompts as an explicit instruction (#20)
+- **Parallel Execution block in PERSONAS** — all agents now receive a `## Parallel Execution` section in their shared common rules, instructing them to parallelise independent tasks via the Agent tool up to the `MAX_PARALLEL_AGENTS` limit even for single messages with multiple tasks (#20)
+
 ### Removed
 - **MANIFEST.md removed** — agent skill weights and team process no longer injected into prompts; `_read_project_context()` function deleted from handler
 
