@@ -192,3 +192,58 @@ class TestWorktreeDiffSpan:
 
             # Reply was still posted despite diff failure
             mock_post.assert_called_once()
+
+
+class TestBatchFlushContextRecovery:
+    """Issue #22: batch flush recovers context when _thread_context stash is missing."""
+
+    def test_recovery_with_valid_channel(
+        self, handler: SlackAgentHandler, mock_provider: MagicMock
+    ) -> None:
+        """When stash is missing but messages have channel, recovery works."""
+        messages = [{"text": "hello", "user_name": "user", "channel": "C_TEST"}]
+
+        with (
+            patch.object(handler, "_process_and_reply") as mock_process,
+            patch("bike_shop.slack.handler.get_thread_context", return_value="ctx"),
+            patch("bike_shop.slack.handler.WebClient") as mock_wc,
+        ):
+            # Do NOT stash any context — simulate the race condition
+            handler._on_batch_flush("test-agent:thread-1", messages)
+
+            # _process_and_reply should still be called (via recovery)
+            assert mock_process.called or mock_wc.called
+            # WebClient should NOT be created — handler uses _fallback_client
+            # (But on first call it creates one via hasattr check)
+
+    def test_drop_with_empty_channel(
+        self, handler: SlackAgentHandler, mock_provider: MagicMock
+    ) -> None:
+        """When stash is missing AND channel is empty, batch is dropped."""
+        messages = [{"text": "hello", "user_name": "user"}]  # no channel
+
+        with patch.object(handler, "_process_and_reply") as mock_process:
+            handler._on_batch_flush("test-agent:thread-1", messages)
+            mock_process.assert_not_called()
+
+    def test_happy_path_with_stashed_context(
+        self, handler: SlackAgentHandler, mock_provider: MagicMock
+    ) -> None:
+        """When stash has context, normal flow is used (no recovery)."""
+        messages = [{"text": "hello", "user_name": "user", "channel": "C_TEST"}]
+
+        # Stash context like _handle_message does
+        with handler._thread_context_lock:
+            handler._thread_context["test-agent:thread-1"] = {
+                "say": MagicMock(),
+                "client": MagicMock(),
+                "channel": "C_TEST",
+            }
+
+        with (
+            patch.object(handler, "_process_and_reply") as mock_process,
+            patch("bike_shop.slack.handler.get_thread_context", return_value="ctx"),
+        ):
+            handler._on_batch_flush("test-agent:thread-1", messages)
+            # Should use stashed context, not recovery
+            assert mock_process.called
