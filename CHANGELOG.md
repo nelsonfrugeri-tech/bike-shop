@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Streaming idle watchdog** — `_call_streaming()` now has the same idle/absolute timeout protection as batch mode (#27). A watchdog thread monitors `last_activity` (updated on each stdout line) and kills the process after `IDLE_TIMEOUT` seconds of silence, preventing agents from hanging forever on blocking commands (e.g. `make dev`, `uvicorn`).
+
 ### Added
 - **MAX_PARALLEL_AGENTS throttle** — new env var (default: `3`) limits how many sub-agents Claude spawns concurrently per batch; injected into batch prompts as an explicit instruction (#20)
 - **Parallel Execution block in PERSONAS** — all agents now receive a `## Parallel Execution` section in their shared common rules, instructing them to parallelise independent tasks via the Agent tool up to the `MAX_PARALLEL_AGENTS` limit even for single messages with multiple tasks (#20)

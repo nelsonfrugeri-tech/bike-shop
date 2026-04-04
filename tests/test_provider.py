@@ -422,6 +422,8 @@ class TestClaudeProviderModeSelection:
 import signal
 import sys
 import textwrap
+import threading
+import time
 import time as time_mod
 
 from bike_shop.providers.claude import (
@@ -615,3 +617,139 @@ class TestProcessCrash:
             agent_name="test",
         )
         assert result.returncode == 42
+
+
+# ---------------------------------------------------------------------------
+# Streaming idle watchdog tests
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingWatchdog:
+    """Streaming mode should also be killed after idle timeout."""
+
+    def _make_hanging_proc(
+        self, lines: list[str], hang_after: bool = True
+    ) -> subprocess.Popen[str]:
+        """Create a real subprocess that emits lines then optionally hangs."""
+        # Build a Python script that prints lines then sleeps forever
+        script_lines = [
+            "import sys, time",
+        ]
+        for line_text in lines:
+            # Escape for repr
+            script_lines.append(f"print({line_text!r}, flush=True)")
+        if hang_after:
+            script_lines.append("time.sleep(300)")  # hang
+        script = "\n".join(script_lines)
+        return subprocess.Popen(
+            [sys.executable, "-u", "-c", script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+
+    def test_streaming_stuck_process_detected(self) -> None:
+        """_parse_stream with watchdog: process that hangs gets killed."""
+        # Use short idle timeout via env override
+        tracer = MagicMock()
+        tracer.start_span.return_value = "span-id"
+
+        event_line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "partial"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        })
+
+        proc = self._make_hanging_proc([event_line], hang_after=True)
+
+        last_activity_ref = [time.monotonic()]
+        stop_event = threading.Event()
+        kill_reason_holder: list[str | None] = [None]
+
+        def _watchdog() -> None:
+            idle_timeout = 2  # 2 seconds for test speed
+            while not stop_event.wait(timeout=0.5):
+                now = time.monotonic()
+                if now - last_activity_ref[0] >= idle_timeout:
+                    kill_reason_holder[0] = "idle"
+                    from bike_shop.providers.claude import _graceful_kill
+                    _graceful_kill(proc, 1)
+                    stop_event.set()
+                    return
+
+        watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+        watchdog_thread.start()
+
+        start = time.monotonic()
+        response, session_id, usage = _parse_stream(
+            proc, tracer, "t1", "g1",
+            last_activity_ref=last_activity_ref,
+        )
+        stop_event.set()
+        watchdog_thread.join(timeout=5)
+
+        elapsed = time.monotonic() - start
+        # Should complete within idle_timeout + grace + margin
+        assert elapsed < 2 + 1 + 3, f"Took too long: {elapsed:.1f}s"
+        assert kill_reason_holder[0] == "idle"
+        # Parser still returns partial data
+        assert response == "partial"
+
+    def test_streaming_healthy_process_not_affected(self) -> None:
+        """Normal streaming process completes without watchdog interference."""
+        tracer = MagicMock()
+        tracer.start_span.return_value = "span-id"
+
+        event_line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "all good"}],
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            },
+        })
+
+        # Process that exits immediately after output (no hang)
+        proc = self._make_hanging_proc([event_line], hang_after=False)
+
+        last_activity_ref = [time.monotonic()]
+
+        response, _, usage = _parse_stream(
+            proc, tracer, "t1", "g1",
+            last_activity_ref=last_activity_ref,
+        )
+
+        assert response == "all good"
+        assert usage["input_tokens"] == 5
+
+    def test_last_activity_ref_updated_on_each_line(self) -> None:
+        """Verify last_activity_ref is updated as lines are read."""
+        tracer = MagicMock()
+        tracer.start_span.return_value = "span-id"
+
+        lines = [
+            json.dumps({"type": "system", "session_id": "s1"}),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {},
+                },
+            }),
+        ]
+
+        proc = self._make_hanging_proc(lines, hang_after=False)
+
+        initial_time = time.monotonic()
+        last_activity_ref = [initial_time]
+
+        _parse_stream(
+            proc, tracer, "t1", "g1",
+            last_activity_ref=last_activity_ref,
+        )
+
+        # After parsing, last_activity should have been updated
+        assert last_activity_ref[0] > initial_time

@@ -392,6 +392,46 @@ class ClaudeProvider(LLMProvider):
         )
 
         proc: subprocess.Popen[str] | None = None
+        last_activity_ref: list[float] = [time.monotonic()]
+        stop_event = threading.Event()
+        # list[str|None] for thread-safe cross-thread access (same pattern as last_activity_ref)
+        kill_reason_ref: list[str | None] = [None]
+
+        def _streaming_watchdog() -> None:
+            """Monitor idle and absolute timeout for streaming mode.
+
+            Note: if _parse_stream raises at the same moment the watchdog kills,
+            both paths call _graceful_kill. This is safe — _graceful_kill handles
+            ProcessLookupError for already-dead processes.
+            """
+            wd_start = time.monotonic()
+            while not stop_event.wait(timeout=1.0):
+                now = time.monotonic()
+                idle_elapsed = now - last_activity_ref[0]
+                total_elapsed = now - wd_start
+
+                if total_elapsed >= MAX_ABSOLUTE_TIMEOUT:
+                    kill_reason_ref[0] = "absolute_timeout"
+                    logger.warning(
+                        "[%s] Streaming process hit absolute timeout (%ds) -- killing",
+                        config.name, MAX_ABSOLUTE_TIMEOUT,
+                    )
+                    if proc and proc.poll() is None:
+                        _graceful_kill(proc, GRACE_PERIOD)
+                    stop_event.set()
+                    return
+
+                if idle_elapsed >= IDLE_TIMEOUT:
+                    kill_reason_ref[0] = "idle"
+                    logger.warning(
+                        "[%s] Streaming process idle for %ds -- killing",
+                        config.name, int(idle_elapsed),
+                    )
+                    if proc and proc.poll() is None:
+                        _graceful_kill(proc, GRACE_PERIOD)
+                    stop_event.set()
+                    return
+
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -401,13 +441,57 @@ class ClaudeProvider(LLMProvider):
                 text=True,
                 cwd=workspace,  # Fix #2: use workspace param, not env var
                 env=env,
+                start_new_session=True,
             )
+
+            # Reset activity timestamp to process start
+            last_activity_ref[0] = time.monotonic()
+
+            watchdog_thread = threading.Thread(
+                target=_streaming_watchdog, daemon=True,
+            )
+            watchdog_thread.start()
 
             response, new_session_id, usage = _parse_stream(
                 proc, tracer, trace_id, gen_id,
+                last_activity_ref=last_activity_ref,
             )
 
+            # Stop watchdog
+            stop_event.set()
+            watchdog_thread.join(timeout=5)
+
             duration_ms = (time.time() - start_time) * 1000
+
+            # If watchdog killed the process, handle timeout
+            kill_reason = kill_reason_ref[0]
+            if kill_reason:
+                timeout_seconds = (
+                    MAX_ABSOLUTE_TIMEOUT if kill_reason == "absolute_timeout"
+                    else IDLE_TIMEOUT
+                )
+                reason = (
+                    "hit absolute safety timeout"
+                    if kill_reason == "absolute_timeout"
+                    else "idle"
+                )
+                logger.warning(
+                    "[%s] Claude CLI streaming timeout after %ds (%.0fms): %s",
+                    config.name, timeout_seconds, duration_ms, reason,
+                )
+                tracer.end_generation(
+                    gen_id,
+                    trace_id=trace_id,
+                    output=f"timeout: {reason}",
+                    metadata={"error": True, "duration_ms": round(duration_ms)},
+                )
+                tracer.update_trace(trace_id, tags=["error", "timeout"])
+                tracer.flush()
+                return (
+                    f"(timeout after {timeout_seconds // 60}min "
+                    f"-- agent was {reason}, task may be stuck)",
+                    None,
+                )
 
             # End generation
             tracer.end_generation(
@@ -454,6 +538,7 @@ class ClaudeProvider(LLMProvider):
             return response, new_session_id
 
         except Exception as e:
+            stop_event.set()
             duration_ms = (time.time() - start_time) * 1000
             logger.error("Claude CLI streaming error: %s", e)
 
@@ -468,11 +553,7 @@ class ClaudeProvider(LLMProvider):
 
             # Kill process if still running
             if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                _graceful_kill(proc, GRACE_PERIOD)
 
             return "(error)", None
 
@@ -482,8 +563,13 @@ def _parse_stream(
     tracer: Tracer,
     trace_id: str,
     gen_id: str,
+    last_activity_ref: list[float] | None = None,
 ) -> tuple[str, str | None, dict[str, Any]]:
     """Parse streaming JSON from Popen, creating spans in real-time.
+
+    When *last_activity_ref* is provided (single-element list), updates
+    ``last_activity_ref[0] = time.monotonic()`` on each stdout line so an
+    external watchdog thread can detect idle processes.
 
     Returns (response_text, session_id, usage_dict).
     """
@@ -537,6 +623,11 @@ def _parse_stream(
         return "...", None, state.to_usage_dict()
 
     for line in proc.stdout:
+        # Update activity BEFORE strip — even blank lines signal the process
+        # is alive and writing to stdout (not stuck on a blocking command).
+        if last_activity_ref is not None:
+            last_activity_ref[0] = time.monotonic()
+
         line = line.strip()
         if not line:
             continue
