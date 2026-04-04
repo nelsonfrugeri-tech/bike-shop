@@ -64,8 +64,8 @@ class ProjectRegistry:
                 github_repo=pdata.get("github_repo", ""),
                 mem0_collection=pdata.get("mem0_collection", f"{pid}-memory"),
                 langfuse_tags=pdata.get("langfuse_tags", []),
-                langfuse_public_key=pdata.get("langfuse_public_key", ""),
-                langfuse_secret_key=pdata.get("langfuse_secret_key", ""),
+                langfuse_public_key=os.path.expandvars(pdata.get("langfuse_public_key", "")),
+                langfuse_secret_key=os.path.expandvars(pdata.get("langfuse_secret_key", "")),
                 mcp_config=pdata.get("mcp_config"),
                 slack_channels=pdata.get("slack_channels", []),
             )
