@@ -86,7 +86,7 @@ The **Semantic Router** dynamically assigns them specialized experts (architect,
    c. Existing thread with --resume and no memory request: skip (--resume has full history)
 
 6. Prompt is assembled:
-   System prompt + Project manifest + Memory context + Thread context + User message
+   System prompt + Memory context + Thread context + User message
 
 7. Claude Code CLI is called:
    claude -p "{prompt}" --agent architect --model opus --resume {session_id} --dangerously-skip-permissions
@@ -387,7 +387,6 @@ bike-shop/
 ├── assets/team/                 # Agent avatars
 ├── docker-compose.yml           # Langfuse + Postgres + Qdrant + Ollama
 ├── mcp.json                     # MCP servers (Notion, draw.io, Excalidraw)
-├── MANIFEST.md                  # Team process definition
 ├── CHANGELOG.md                 # Release history
 ├── pyproject.toml               # Dependencies and build config
 └── .env.example                 # All configuration variables
@@ -586,8 +585,6 @@ Available to all agents via MCP:
 ---
 
 ## 📋 Team Process
-
-See [MANIFEST.md](MANIFEST.md) for the full process definition.
 
 | Phase | What happens | Who decides |
 |-------|-------------|-------------|
