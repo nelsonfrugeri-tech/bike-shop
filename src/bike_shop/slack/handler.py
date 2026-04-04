@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import threading
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from slack_bolt import App
@@ -37,9 +39,22 @@ from bike_shop.worktree import ensure_worktree
 logger = logging.getLogger(__name__)
 
 MAX_AGENT_INTERACTIONS = int(os.environ.get("MAX_AGENT_INTERACTIONS", "20"))
+AGENT_INTERACTION_TTL = float(os.environ.get("AGENT_INTERACTION_TTL", "1800"))
 
-# Track agent-to-agent messages per thread: thread_ts -> count
-_agent_interactions: dict[str, int] = {}
+_GC_THRESHOLD = 100
+
+
+@dataclass
+class InteractionState:
+    """Tracks agent-to-agent interaction count and last activity time per thread."""
+
+    count: int = 0
+    last_activity: float = 0.0  # time.monotonic() timestamp; 0.0 means never seen
+
+
+# Track agent-to-agent messages per thread: thread_ts -> InteractionState
+_agent_interactions: dict[str, InteractionState] = {}
+_interactions_lock = threading.Lock()
 
 # Bot user IDs of all agents — resolved lazily
 _bot_user_ids: set[str] | None = None
@@ -52,6 +67,70 @@ def _get_bot_user_ids() -> set[str]:
         _bot_user_ids = set(mentions.values())
         logger.info("Bot user IDs resolved: %s", _bot_user_ids)
     return _bot_user_ids
+
+
+
+def _check_and_update_interaction(thread_ts: str) -> tuple[bool, int]:
+    """Check whether the next agent interaction is allowed and update the counter.
+
+    Applies TTL expiry before checking the limit. Triggers lazy GC when the
+    dict grows beyond _GC_THRESHOLD entries.
+
+    Args:
+        thread_ts: Slack thread timestamp used as the interaction key.
+
+    Returns:
+        A tuple of (allowed, current_count). allowed is True if the interaction
+        is permitted, False if the limit is reached. current_count reflects the
+        updated count after a permitted interaction, or the limit when blocked.
+    """
+    with _interactions_lock:
+        if len(_agent_interactions) > _GC_THRESHOLD:
+            _gc_interactions()
+
+        now = time.monotonic()
+        state = _agent_interactions.get(thread_ts)
+
+        if state is not None and (now - state.last_activity) > AGENT_INTERACTION_TTL:
+            # TTL expired — reset the counter for this thread
+            state = None
+
+        if state is None:
+            _agent_interactions[thread_ts] = InteractionState(count=1, last_activity=now)
+            return True, 1
+
+        if state.count >= MAX_AGENT_INTERACTIONS:
+            return False, state.count
+
+        state.count += 1
+        state.last_activity = now
+        return True, state.count
+
+
+def _reset_interaction(thread_ts: str) -> None:
+    """Remove the interaction counter for a thread (called on human messages).
+
+    Args:
+        thread_ts: Slack thread timestamp to reset.
+    """
+    with _interactions_lock:
+        _agent_interactions.pop(thread_ts, None)
+
+
+def _gc_interactions() -> None:
+    """Remove stale interaction entries older than 2 * AGENT_INTERACTION_TTL.
+
+    This is a lazy garbage collector called only when the dict exceeds
+    _GC_THRESHOLD entries to avoid unbounded memory growth.
+
+    Note: Must be called with _interactions_lock held.
+    """
+    if len(_agent_interactions) <= _GC_THRESHOLD:
+        return
+    cutoff = time.monotonic() - (2 * AGENT_INTERACTION_TTL)
+    stale_keys = [k for k, s in _agent_interactions.items() if s.last_activity < cutoff]
+    for k in stale_keys:
+        del _agent_interactions[k]
 
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -675,19 +754,21 @@ class SlackAgentHandler:
         # Track agent-to-agent interactions and enforce limit
         is_from_agent = is_bot_msg or (user_id in _get_bot_user_ids())
         if is_from_agent:
-            count = _agent_interactions.get(thread_ts, 0)
-            if count >= MAX_AGENT_INTERACTIONS:
+            allowed, current_count = _check_and_update_interaction(thread_ts)
+            if not allowed:
                 logger.warning(
                     "[%s] Ignoring agent message -- limit of %d agent interactions "
                     "reached in thread %s",
                     self._config.name, MAX_AGENT_INTERACTIONS, thread_ts,
                 )
                 return
-            _agent_interactions[thread_ts] = count + 1
             logger.info(
                 "[%s] Agent-to-agent interaction %d/%d in thread %s",
-                self._config.name, count + 1, MAX_AGENT_INTERACTIONS, thread_ts,
+                self._config.name, current_count, MAX_AGENT_INTERACTIONS, thread_ts,
             )
+        else:
+            # Human message — reset the interaction counter for this thread
+            _reset_interaction(thread_ts)
 
         if user_id:
             user_name = resolve_user(client, user_id)

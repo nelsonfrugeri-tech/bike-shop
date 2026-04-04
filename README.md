@@ -613,6 +613,8 @@ Available to all agents via MCP:
 | `MSG_BUFFER_WINDOW` | | Seconds to buffer rapid-fire messages (default: `3.0`) |
 | `MAX_BATCH_SIZE` | | Max messages per batch before immediate flush (default: `10`) |
 | `MAX_PARALLEL_AGENTS` | | Max sub-agents spawned concurrently per batch (default: `3`) |
+| `MAX_AGENT_INTERACTIONS` | | Max agent-to-agent messages per thread before blocking (default: `20`) |
+| `AGENT_INTERACTION_TTL` | | Seconds before an idle thread's interaction counter resets (default: `1800`) |
 | `CLAUDE_IDLE_TIMEOUT` | | Kill process after N seconds with no stdout output (default: `300`) |
 | `CLAUDE_MAX_TIMEOUT` | | Absolute safety net — kill no matter what (default: `1800`) |
 | `LANGFUSE_PUBLIC_KEY` | | Langfuse public key for tracing |
