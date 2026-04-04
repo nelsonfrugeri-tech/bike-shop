@@ -68,10 +68,41 @@ def _worktrees_base(worktree_dir: str | None = None) -> str:
     return wt_dir
 
 
+def _detect_default_branch(repo_path: str) -> str:
+    """Detect the default branch of a git repo (main, master, etc.)."""
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            # refs/remotes/origin/main → main
+            return result.stdout.strip().rsplit("/", 1)[-1]
+    except Exception:
+        pass
+
+    # Fallback: check if main or master exists
+    for branch in ("main", "master"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"origin/{branch}"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return branch
+
+    return "main"
+
+
 def create_worktree(
     name: str,
     branch: str | None = None,
-    base_branch: str = "main",
+    base_branch: str | None = None,
     repo_path: str | None = None,
     worktree_dir: str | None = None,
 ) -> str:
@@ -80,7 +111,7 @@ def create_worktree(
     Args:
         name: Worktree directory name (e.g. "elliot-funds-abc123").
         branch: Branch name to create. Defaults to "worktree/{name}".
-        base_branch: Branch to base the new worktree from.
+        base_branch: Branch to base the new worktree from. Auto-detected if None.
         repo_path: Explicit repo path (overrides AGENT_WORKSPACE env var).
         worktree_dir: Explicit worktree dir (overrides AGENT_WORKTREE_DIR env var).
 
@@ -91,6 +122,9 @@ def create_worktree(
         RuntimeError: If worktree creation fails.
     """
     ws = _workspace_root(repo_path)
+    if base_branch is None:
+        base_branch = _detect_default_branch(ws)
+        logger.info("[worktree] Auto-detected default branch: %s", base_branch)
     base = _worktrees_base(worktree_dir)
     os.makedirs(base, exist_ok=True)
 
@@ -209,7 +243,7 @@ def get_worktree_path(name: str) -> str | None:
 def ensure_worktree(
     agent_key: str,
     task_id: str | None = None,
-    base_branch: str = "main",
+    base_branch: str | None = None,
     repo_path: str | None = None,
     worktree_dir: str | None = None,
 ) -> str:
@@ -218,7 +252,7 @@ def ensure_worktree(
     Args:
         agent_key: Agent identifier (e.g. "elliot").
         task_id: Optional task suffix. Defaults to "default".
-        base_branch: Branch to base the worktree from.
+        base_branch: Branch to base the worktree from. Auto-detected if None.
         repo_path: Explicit repo path (overrides AGENT_WORKSPACE env var).
         worktree_dir: Explicit worktree dir (overrides AGENT_WORKTREE_DIR env var).
 

@@ -352,7 +352,7 @@ class TestWorktreeProjectOverrides:
         )
         mock_create.assert_called_once_with(
             "elliot-default",
-            base_branch="main",
+            base_branch=None,
             repo_path="/custom/repo",
             worktree_dir="/custom/wt",
         )
