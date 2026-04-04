@@ -280,7 +280,10 @@ class SlackAgentHandler:
         memory_agent = self._get_memory_agent(project)
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
-        session_id = self._session.get(thread_ts)
+        session_id = self._session.get(
+            thread_ts,
+            project_id=project.project_id if project else None,
+        )
 
         # Memory recall: full recall on new threads + router-driven filtered recall
         memory_span_id = tracer.start_span(
@@ -363,7 +366,10 @@ class SlackAgentHandler:
         memory_agent = self._get_memory_agent(project)
         mcp_config = _build_mcp_config(config)
         github_token = self._github.get_token()
-        session_id = self._session.get(thread_ts)
+        session_id = self._session.get(
+            thread_ts,
+            project_id=project.project_id if project else None,
+        )
 
         # Combine message texts for memory lookup
         combined_text = " ".join(m.get("text", "") for m in messages)
