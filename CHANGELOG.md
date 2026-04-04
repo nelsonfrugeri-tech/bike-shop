@@ -8,9 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Per-project Tracer propagation to provider** — `_call_llm_batch` now resolves the per-project `Tracer` and passes it to `provider.call()`, fixing a `NameError` where the undefined `tracer` variable was referenced (#33)
 - **Cross-project session resume** — `SessionStore.get()` now validates `project_id` before resuming, preventing Claude CLI crash (rc=1) when agents switch between projects
 
 ### Added
+- **Worktree git diff in Langfuse traces** — after each LLM call, a `worktree.diff` span captures `git diff --stat HEAD` from the agent's worktree, providing visibility into file changes per interaction (#34)
 - **Multi-project support** — agents can work on multiple repos from a single platform
   - `projects.yaml` config file maps Slack channels to projects with per-project repo paths, worktree dirs, Mem0 collections, and Langfuse keys
   - `ProjectConfig` (frozen dataclass) carries all project-specific settings
