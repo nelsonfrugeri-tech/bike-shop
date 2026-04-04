@@ -1,8 +1,9 @@
 """Tests for agent interaction counter: TTL, human reset, and GC."""
 from __future__ import annotations
 
+import concurrent.futures
+import threading
 import time
-from unittest.mock import patch
 
 import pytest
 
@@ -54,14 +55,18 @@ def test_interaction_state_custom_values():
 
 def test_check_and_update_first_message_allowed():
     """First agent message in a thread is always allowed."""
-    allowed = _check_and_update_interaction("thread-1")
+    allowed, count = _check_and_update_interaction("thread-1")
     assert allowed is True
+    assert count == 1
     assert _agent_interactions["thread-1"].count == 1
 
 
 def test_check_and_update_increments_count():
-    allowed_results = [_check_and_update_interaction("thread-2") for _ in range(5)]
+    results = [_check_and_update_interaction("thread-2") for _ in range(5)]
+    allowed_results = [r[0] for r in results]
+    count_results = [r[1] for r in results]
     assert all(allowed_results)
+    assert count_results == [1, 2, 3, 4, 5]
     assert _agent_interactions["thread-2"].count == 5
 
 
@@ -71,8 +76,9 @@ def test_check_and_update_blocks_at_limit():
         count=MAX_AGENT_INTERACTIONS,
         last_activity=time.monotonic(),
     )
-    allowed = _check_and_update_interaction("thread-3")
+    allowed, count = _check_and_update_interaction("thread-3")
     assert allowed is False
+    assert count == MAX_AGENT_INTERACTIONS
     # Count must NOT be incremented when blocked
     assert _agent_interactions["thread-3"].count == MAX_AGENT_INTERACTIONS
 
@@ -98,8 +104,9 @@ def test_ttl_expired_counter_resets():
         count=MAX_AGENT_INTERACTIONS,
         last_activity=old_ts,
     )
-    allowed = _check_and_update_interaction("thread-ttl")
+    allowed, count = _check_and_update_interaction("thread-ttl")
     assert allowed is True
+    assert count == 1
     assert _agent_interactions["thread-ttl"].count == 1
 
 
@@ -109,7 +116,7 @@ def test_ttl_not_expired_keeps_count():
         count=MAX_AGENT_INTERACTIONS,
         last_activity=time.monotonic(),
     )
-    allowed = _check_and_update_interaction("thread-live")
+    allowed, _ = _check_and_update_interaction("thread-live")
     assert allowed is False
 
 
@@ -135,8 +142,9 @@ def test_reset_allows_new_messages_after_human():
         last_activity=time.monotonic(),
     )
     _reset_interaction("thread-reset")
-    allowed = _check_and_update_interaction("thread-reset")
+    allowed, count = _check_and_update_interaction("thread-reset")
     assert allowed is True
+    assert count == 1
     assert _agent_interactions["thread-reset"].count == 1
 
 
@@ -187,7 +195,8 @@ def test_gc_triggered_automatically_on_new_interaction():
         _agent_interactions[f"stale-{i}"] = InteractionState(count=1, last_activity=stale_ts)
 
     # Adding one more entry via the public function should trigger GC
-    _check_and_update_interaction("trigger-gc")
+    allowed, _ = _check_and_update_interaction("trigger-gc")
+    assert allowed is True
 
     # Stale entries should have been GC'd
     for i in range(101):
@@ -210,5 +219,50 @@ def test_boundary_counts(count: int, expected_allowed: bool):
         count=count,
         last_activity=time.monotonic(),
     )
-    allowed = _check_and_update_interaction("thread-boundary")
+    allowed, _ = _check_and_update_interaction("thread-boundary")
     assert allowed is expected_allowed
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: thread-safety with ThreadPoolExecutor
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_interactions_no_race_conditions():
+    """Hammer _check_and_update_interaction from multiple threads simultaneously.
+
+    Verifies that the counter never exceeds MAX_AGENT_INTERACTIONS and that
+    exactly MAX_AGENT_INTERACTIONS calls are allowed (no double-counting).
+    """
+    thread_ts = "thread-concurrent"
+    num_threads = 50
+    # Use more calls than the limit to ensure blocking logic is exercised.
+    num_calls_per_thread = 2
+    total_calls = num_threads * num_calls_per_thread
+
+    allowed_count = 0
+    blocked_count = 0
+    results_lock = threading.Lock()
+
+    def call_interaction() -> None:
+        nonlocal allowed_count, blocked_count
+        allowed, _ = _check_and_update_interaction(thread_ts)
+        with results_lock:
+            if allowed:
+                allowed_count += 1
+            else:
+                blocked_count += 1
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [executor.submit(call_interaction) for _ in range(total_calls)]
+        concurrent.futures.wait(futures)
+
+    # Re-raise any exceptions from threads
+    for f in futures:
+        f.result()
+
+    # Exactly MAX_AGENT_INTERACTIONS calls should have been allowed
+    assert allowed_count == MAX_AGENT_INTERACTIONS
+    assert blocked_count == total_calls - MAX_AGENT_INTERACTIONS
+    # The stored count must not exceed the limit
+    assert _agent_interactions[thread_ts].count == MAX_AGENT_INTERACTIONS
