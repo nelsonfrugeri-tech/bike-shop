@@ -43,7 +43,6 @@ def handler(mock_config: MagicMock, mock_provider: MagicMock) -> SlackAgentHandl
         patch("bike_shop.slack.handler.SessionStore"),
         patch("bike_shop.slack.handler.ModelSwitcher"),
         patch("bike_shop.slack.handler._build_mcp_config", return_value="/tmp/mcp.json"),
-        patch("bike_shop.slack.handler._read_project_context", return_value=""),
     ):
         h = SlackAgentHandler(mock_config, mock_provider)
     return h
