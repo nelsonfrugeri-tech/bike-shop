@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **MANIFEST.md removed** — agent skill weights and team process no longer injected into prompts; `_read_project_context()` function deleted from handler
 
 ### Fixed
+- **Tool result parsing for Langfuse spans** — `_handle_event()` now parses `type: "user"` events containing `tool_result` content blocks (the actual Claude CLI stream-json format), fixing tool spans showing `output=NULL` in Langfuse. Legacy `type: "result"` format kept for backwards compatibility.
 - **Per-project Tracer propagation to provider** — `_call_llm_batch` now resolves the per-project `Tracer` and passes it to `provider.call()`, fixing a `NameError` where the undefined `tracer` variable was referenced (#33)
 - **Cross-project session resume** — `SessionStore.get()` now validates `project_id` before resuming, preventing Claude CLI crash (rc=1) when agents switch between projects
 
