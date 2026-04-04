@@ -343,6 +343,7 @@ class SlackAgentHandler:
             workspace=workspace,
             trace_id=trace_id,
             parent_span_id=llm_span_id,
+            tracer=tracer,
         )
 
         if llm_span_id and trace_id:
@@ -391,6 +392,7 @@ class SlackAgentHandler:
             github_token=github_token,
             workspace=workspace,
             trace_id=trace_id,
+            tracer=tracer,
         )
 
         if new_session_id and thread_ts:

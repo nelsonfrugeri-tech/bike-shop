@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from bike_shop.config import AgentConfig
 
@@ -23,6 +24,7 @@ class LLMProvider(ABC):
         github_token: str | None = None,
         router_meta: dict | None = None,
         workspace: str | None = None,
+        tracer: Any | None = None,
     ) -> tuple[str, str | None]:
         """Send prompt to the LLM. Returns (response_text, session_id)."""
         ...
