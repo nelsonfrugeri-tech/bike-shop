@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Batch flush context recovery** — when `_thread_context` stash is missing, reconstruct `say`/`client` from message channel and bot token instead of silently discarding the batch (#22)
 - **Streaming idle watchdog** — `_call_streaming()` now has the same idle/absolute timeout protection as batch mode (#27). A watchdog thread monitors `last_activity` (updated on each stdout line) and kills the process after `IDLE_TIMEOUT` seconds of silence, preventing agents from hanging forever on blocking commands (e.g. `make dev`, `uvicorn`).
 
 ### Added
