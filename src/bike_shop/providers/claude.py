@@ -122,7 +122,31 @@ def _handle_event(event: dict[str, Any], state: _ParseState,
             state.cache_read_tokens += usage.get("cache_read_input_tokens", 0)
             state.cache_creation_tokens += usage.get("cache_creation_input_tokens", 0)
 
-    # Tool results
+    # User messages containing tool results (actual Claude CLI format)
+    if event_type == "user":
+        content = event.get("message", {}).get("content", [])
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_use_id = block.get("tool_use_id", "")
+                result_content = block.get("content", "")
+                if isinstance(result_content, list):
+                    result_content = json.dumps(result_content)[:1000]
+                elif isinstance(result_content, str):
+                    result_content = result_content[:1000]
+                else:
+                    result_content = json.dumps(result_content)[:1000]
+                is_error = block.get("is_error", False)
+
+                state.tool_results.append({
+                    "tool_use_id": tool_use_id,
+                    "content": result_content,
+                    "is_error": is_error,
+                })
+
+                if on_span:
+                    on_span("tool_result", block, state)
+
+    # Tool results (legacy format, kept for backwards compatibility)
     if event_type == "result" and event.get("subtype") == "tool_result":
         tool_use_id = event.get("tool_use_id", "")
         content = json.dumps(event.get("content", ""))[:1000]

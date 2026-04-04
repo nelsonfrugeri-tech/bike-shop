@@ -111,6 +111,119 @@ class TestParseResponse:
         assert len(usage["errors"]) == 1
         assert usage["errors"][0]["type"] == "rate_limit"
 
+    def test_user_event_tool_results_parsed(self) -> None:
+        """Tool results in user events (actual Claude CLI format) are parsed."""
+        events = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}},
+                        {"type": "text", "text": "Done"},
+                    ],
+                    "usage": {"input_tokens": 50, "output_tokens": 30},
+                },
+            }),
+            json.dumps({
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu1",
+                            "content": "file1.txt\nfile2.txt",
+                            "is_error": False,
+                        }
+                    ],
+                },
+            }),
+        ]
+        stdout = "\n".join(events)
+
+        response, _, usage = _parse_response(stdout)
+
+        assert response == "Done"
+        assert len(usage["tools"]) == 1
+        assert len(usage["tool_results"]) == 1
+        assert usage["tool_results"][0]["tool_use_id"] == "tu1"
+        assert "file1.txt" in usage["tool_results"][0]["content"]
+
+    def test_user_event_tool_result_with_list_content(self) -> None:
+        """Tool results with list content are JSON-serialized."""
+        events = [
+            json.dumps({
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu2",
+                            "content": [{"type": "text", "text": "output"}],
+                            "is_error": False,
+                        }
+                    ],
+                },
+            }),
+        ]
+        stdout = "\n".join(events)
+
+        _, _, usage = _parse_response(stdout)
+
+        assert len(usage["tool_results"]) == 1
+        assert usage["tool_results"][0]["tool_use_id"] == "tu2"
+        assert "output" in usage["tool_results"][0]["content"]
+
+    def test_user_event_tool_result_error(self) -> None:
+        """Tool results with is_error=True are captured."""
+        events = [
+            json.dumps({
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu3",
+                            "content": "command not found",
+                            "is_error": True,
+                        }
+                    ],
+                },
+            }),
+        ]
+        stdout = "\n".join(events)
+
+        _, _, usage = _parse_response(stdout)
+
+        assert len(usage["tool_results"]) == 1
+        assert usage["tool_results"][0]["is_error"] is True
+
+    def test_both_user_and_legacy_tool_results(self) -> None:
+        """Both user-event and legacy result-event formats are parsed."""
+        events = [
+            json.dumps({
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "tu1", "content": "from user", "is_error": False},
+                    ],
+                },
+            }),
+            json.dumps({
+                "type": "result",
+                "subtype": "tool_result",
+                "tool_use_id": "tu2",
+                "content": "from legacy",
+                "is_error": False,
+            }),
+        ]
+        stdout = "\n".join(events)
+
+        _, _, usage = _parse_response(stdout)
+
+        assert len(usage["tool_results"]) == 2
+        ids = {r["tool_use_id"] for r in usage["tool_results"]}
+        assert ids == {"tu1", "tu2"}
+
     def test_malformed_json_lines_ignored(self) -> None:
         events = [
             "not json at all",
@@ -219,6 +332,47 @@ class TestParseStream:
         # Thinking span created with name "thinking.1"
         call_args = tracer.start_span.call_args_list
         assert any("thinking" in str(c) for c in call_args)
+
+    def test_creates_tool_spans_from_user_events(self) -> None:
+        """Tool results in user events populate tool span output."""
+        tracer = MagicMock()
+        tracer.start_span.return_value = "tool-span-id"
+
+        lines = [
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"cmd": "ls"}},
+                        {"type": "text", "text": "Done"},
+                    ],
+                    "usage": {},
+                },
+            }),
+            json.dumps({
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu1",
+                            "content": "file.txt",
+                            "is_error": False,
+                        }
+                    ],
+                },
+            }),
+        ]
+        proc = self._make_proc(lines)
+
+        response, _, usage = _parse_stream(proc, tracer, "t1", "g1")
+
+        assert response == "Done"
+        assert len(usage["tool_results"]) == 1
+        # end_span called with output for the tool
+        tracer.end_span.assert_called()
+        end_call_kwargs = tracer.end_span.call_args
+        assert end_call_kwargs is not None
 
     def test_empty_output_returns_ellipsis(self) -> None:
         tracer = MagicMock()
