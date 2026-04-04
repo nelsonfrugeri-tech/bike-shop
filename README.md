@@ -249,6 +249,39 @@ All agents share long-term memory powered by [Mem0](https://github.com/mem0ai/me
 
 **Stack:** Qdrant (vector DB) + Ollama (nomic-embed-text, 768 dimensions, local GPU, zero API cost)
 
+### Multi-Project Support
+
+Agents can work on multiple repositories from a single platform. Define projects in `projects.yaml`:
+
+```yaml
+default_project: market-analysis
+
+projects:
+  market-analysis:
+    display_name: "Market Analysis"
+    repo_path: "${MARKET_ANALYSIS_REPO_PATH}"
+    worktree_dir: "${MARKET_ANALYSIS_WORKTREE_DIR}"
+    github_repo: "org/market-analysis"
+    mem0_collection: "market-analysis-memory"
+    langfuse_tags: ["market-analysis"]
+    langfuse_public_key: "pk-lf-..."
+    langfuse_secret_key: "sk-lf-..."
+    slack_channels: ["C111", "C222"]
+
+  autarch:
+    display_name: "Autarch"
+    repo_path: "${AUTARCH_REPO_PATH}"
+    # ... same structure
+    slack_channels: ["C333"]
+```
+
+**How it works:**
+1. Each Slack channel maps to a project via `slack_channels`
+2. When a message arrives, `ProjectResolver` determines the project (channel mapping -> thread inheritance -> default fallback)
+3. The handler uses project-specific: repo path, worktree dir, Mem0 collection, and Langfuse keys
+4. Environment variables in paths (`${VAR}`) are resolved via `os.path.expandvars()`
+5. Fully backwards compatible -- without `projects.yaml`, everything falls back to global env vars
+
 ---
 
 ## ✨ Features
@@ -262,6 +295,7 @@ All agents share long-term memory powered by [Mem0](https://github.com/mem0ai/me
 | 📊 **Full Observability** | Langfuse traces: input, output, tokens, tools, thinking, errors, router decisions |
 | 🔄 **Model Switching** | Automatic (router), manual ("think deeply"), self-escalation (`[DEEP_THINK]`) |
 | 🤝 **Smart Collaboration** | Agents tag teammates for PR reviews and blockers — anti-loop (max 5/thread) |
+| **Multi-Project** | Same team works on multiple repos — channel-to-project mapping via `projects.yaml` |
 | 🔐 **GitHub Identity** | Each agent has its own GitHub App with JWT auth |
 | **Experts Architecture** | Agents dynamically assume specialized experts from [claude-code](https://github.com/nelsonfrugeri-tech/claude-code) |
 | 👁️ **Sentinel** | SRE agent for querying Langfuse: tokens, costs, errors, health |
@@ -332,6 +366,7 @@ bike-shop/
 │   ├── main.py                  # CLI: bike-shop agent:all, --status, --stop
 │   ├── config.py                # AgentConfig, MODEL_MAP, env loading
 │   ├── agents.py                # Agent prompts (common rules, no personality)
+│   ├── project.py               # Multi-project: ProjectConfig, ProjectRegistry, ProjectResolver
 │   ├── router.py                # Semantic Router (haiku → agent + model, dynamic expert discovery)
 │   ├── memory_agent.py          # MemoryAgent (Mem0: recall, recall_filtered, observe)
 │   ├── memory_schema.py         # Unified memory domain (scopes + types)
@@ -348,6 +383,7 @@ bike-shop/
 │   └── slack/
 │       ├── context.py           # Thread context, mentions, user resolution
 │       └── handler.py           # SlackAgentHandler (orchestrates the full flow)
+├── projects.yaml                # Multi-project configuration (channels → repos)
 ├── assets/team/                 # Agent avatars
 ├── docker-compose.yml           # Langfuse + Postgres + Qdrant + Ollama
 ├── mcp.json                     # MCP servers (Notion, draw.io, Excalidraw)
@@ -592,6 +628,8 @@ See [MANIFEST.md](MANIFEST.md) for the full process definition.
 | `OLLAMA_URL` | | Ollama URL for embeddings (default: `http://localhost:11434`) |
 | `ANTHROPIC_API_KEY` | | Anthropic API key for Mem0 fact extraction (haiku) |
 | `NOTION_API_KEY` | | Notion integration token |
+| `{PROJECT}_REPO_PATH` | | Project repo path (referenced in `projects.yaml`) |
+| `{PROJECT}_WORKTREE_DIR` | | Project worktree directory (referenced in `projects.yaml`) |
 
 Where `{AGENT}` is one of: `MR_ROBOT`, `ELLIOT`, `TYRELL`.
 

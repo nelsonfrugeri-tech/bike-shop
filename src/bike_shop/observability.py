@@ -54,9 +54,10 @@ def _get_config() -> tuple[str, str] | None:
     return host, f"Basic {credentials}"
 
 
-def _post(path: str, body: dict[str, Any]) -> bool:
+def _post(path: str, body: dict[str, Any],
+          config_override: tuple[str, str] | None = None) -> bool:
     """Send a POST request to Langfuse API. Returns True on success."""
-    config = _get_config()
+    config = config_override or _get_config()
     if not config:
         return False
 
@@ -111,12 +112,14 @@ def _uuid() -> str:
 class _BatchBuffer:
     """Thread-safe event buffer that auto-flushes on interval."""
 
-    def __init__(self, flush_interval_ms: int = FLUSH_INTERVAL_MS) -> None:
+    def __init__(self, flush_interval_ms: int = FLUSH_INTERVAL_MS,
+                 config_override: tuple[str, str] | None = None) -> None:
         self._events: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._flush_interval = flush_interval_ms / 1000.0
         self._timer: threading.Timer | None = None
         self._started = False
+        self._config_override = config_override
 
     def add(self, event: dict[str, Any]) -> None:
         with self._lock:
@@ -146,7 +149,8 @@ class _BatchBuffer:
             self._started = False
 
         if events:
-            ok = _post("/api/public/ingestion", {"batch": events})
+            ok = _post("/api/public/ingestion", {"batch": events},
+                       config_override=self._config_override)
             if ok:
                 logger.debug("Langfuse batch flushed (%d events)", len(events))
             else:
@@ -182,9 +186,32 @@ class Tracer:
     - Graceful degradation when Langfuse is unavailable
     """
 
-    def __init__(self, agent_name: str) -> None:
+    def __init__(
+        self,
+        agent_name: str,
+        langfuse_public_key: str | None = None,
+        langfuse_secret_key: str | None = None,
+    ) -> None:
         self._agent_name = agent_name
-        self._enabled = _get_config() is not None and _parse_detail() != TraceDetail.OFF
+        self._custom_config: tuple[str, str] | None = None
+
+        if langfuse_public_key and langfuse_secret_key:
+            host = os.environ.get("LANGFUSE_HOST", "http://localhost:3000")
+            credentials = b64encode(
+                f"{langfuse_public_key}:{langfuse_secret_key}".encode()
+            ).decode()
+            self._custom_config = (host, f"Basic {credentials}")
+
+        config = self._custom_config or _get_config()
+        self._enabled = config is not None and _parse_detail() != TraceDetail.OFF
+
+        # Per-project buffer when custom Langfuse keys are provided,
+        # otherwise use the shared global buffer
+        if self._custom_config:
+            self._buffer = _BatchBuffer(config_override=self._custom_config)
+        else:
+            self._buffer = _buffer
+
         if self._enabled:
             logger.info("[%s] Langfuse tracing enabled (detail=%s)", agent_name, TRACE_DETAIL)
 
@@ -213,7 +240,7 @@ class Tracer:
         trace_id = _uuid()
         now = _now_iso()
 
-        _buffer.add({
+        self._buffer.add({
             "id": _uuid(),
             "type": "trace-create",
             "timestamp": now,
@@ -250,7 +277,7 @@ class Tracer:
         if tags is not None:
             body["tags"] = tags
 
-        _buffer.add({
+        self._buffer.add({
             "id": _uuid(),
             "type": "trace-create",
             "timestamp": _now_iso(),
@@ -285,7 +312,7 @@ class Tracer:
         if input is not None:
             body["input"] = _ensure_json_object(input)
 
-        _buffer.add({
+        self._buffer.add({
             "id": _uuid(),
             "type": "span-create",
             "timestamp": now,
@@ -320,7 +347,7 @@ class Tracer:
         if level:
             body["level"] = level
 
-        _buffer.add({
+        self._buffer.add({
             "id": _uuid(),
             "type": "span-update",
             "timestamp": now,
@@ -357,7 +384,7 @@ class Tracer:
         if input is not None:
             body["input"] = _ensure_json_object(input)
 
-        _buffer.add({
+        self._buffer.add({
             "id": _uuid(),
             "type": "generation-create",
             "timestamp": now,
@@ -393,7 +420,7 @@ class Tracer:
         if metadata:
             body["metadata"] = metadata
 
-        _buffer.add({
+        self._buffer.add({
             "id": _uuid(),
             "type": "generation-update",
             "timestamp": now,
@@ -402,7 +429,7 @@ class Tracer:
 
     def flush(self) -> None:
         """Force flush all pending events."""
-        _buffer.flush()
+        self._buffer.flush()
 
     # ------------------------------------------------------------------
     # Backwards-compatible API

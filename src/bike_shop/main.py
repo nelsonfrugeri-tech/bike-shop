@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from bike_shop.config import AGENT_REGISTRY, load_config
 from bike_shop.handlers import create_handler
+from bike_shop.project import ProjectRegistry
 from bike_shop.worktree import cleanup_stale_worktrees, ensure_worktree
 
 load_dotenv()
@@ -25,6 +26,39 @@ logging.getLogger("slack_sdk").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 PID_DIR = os.path.join(os.path.expanduser("~"), ".cache", "bike-shop")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECTS_YAML = os.path.join(_PROJECT_ROOT, "projects.yaml")
+
+# Module-level project registry (loaded once at startup)
+_project_registry: ProjectRegistry | None = None
+
+
+def _load_project_registry() -> ProjectRegistry | None:
+    """Load projects.yaml and return a ProjectRegistry, or None if not found."""
+    global _project_registry
+    if _project_registry is not None:
+        return _project_registry
+
+    if not os.path.exists(_PROJECTS_YAML):
+        logger.warning("projects.yaml not found at %s — multi-project disabled", _PROJECTS_YAML)
+        return None
+
+    try:
+        registry = ProjectRegistry(_PROJECTS_YAML)
+        # Validate project paths
+        for project in registry.all_projects():
+            if project.repo_path and not os.path.isdir(project.repo_path):
+                logger.warning(
+                    "Project '%s' repo_path does not exist: %s",
+                    project.project_id, project.repo_path,
+                )
+            if project.worktree_dir:
+                os.makedirs(project.worktree_dir, exist_ok=True)
+        _project_registry = registry
+        return registry
+    except Exception as e:
+        logger.error("Failed to load projects.yaml: %s", e)
+        return None
 
 
 def _pid_file(agent_name: str) -> str:
@@ -144,7 +178,8 @@ def _connect_agent(agent_name: str) -> tuple[str, SocketModeHandler]:
     config = load_config(agent_name)
     logger.info("Starting %s (%s) [%s]...", config.name, config.role, config.bot_user_id)
 
-    handler = create_handler(config)
+    registry = _load_project_registry()
+    handler = create_handler(config, project_registry=registry)
     handler.connect()
     _write_pid(agent_name)
 

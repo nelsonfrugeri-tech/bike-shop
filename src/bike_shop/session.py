@@ -40,7 +40,20 @@ class SessionStore:
             return None
         return entry.get("session_id")
 
-    def store(self, thread_ts: str, session_id: str) -> None:
+    def get_project_id(self, thread_ts: str) -> str | None:
+        """Return the project_id stored for this thread, or None."""
         sessions = self._load()
-        sessions[thread_ts] = {"session_id": session_id, "ts": time.time()}
+        entry = sessions.get(thread_ts)
+        if not entry:
+            return None
+        if time.time() - entry.get("ts", 0) > SESSION_TTL:
+            return None
+        return entry.get("project_id")
+
+    def store(self, thread_ts: str, session_id: str, project_id: str | None = None) -> None:
+        sessions = self._load()
+        data: dict[str, object] = {"session_id": session_id, "ts": time.time()}
+        if project_id:
+            data["project_id"] = project_id
+        sessions[thread_ts] = data
         self._save(sessions)

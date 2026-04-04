@@ -23,13 +23,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-def _workspace_root() -> str:
-    """Get AGENT_WORKSPACE or raise.
+def _workspace_root(repo_path: str | None = None) -> str:
+    """Get workspace root from explicit param or AGENT_WORKSPACE env var.
+
+    Args:
+        repo_path: Explicit repo path (from ProjectConfig). Falls back to
+                   AGENT_WORKSPACE env var if None.
 
     AGENT_WORKSPACE must point to the main git repository.
     It is used as the cwd for git commands but never written to directly.
     """
-    ws = os.environ.get("AGENT_WORKSPACE")
+    ws = repo_path or os.environ.get("AGENT_WORKSPACE")
     if not ws:
         raise RuntimeError(
             "AGENT_WORKSPACE not set — cannot create worktrees. "
@@ -42,16 +46,20 @@ def _workspace_root() -> str:
     return ws
 
 
-def _worktrees_base() -> str:
-    """Return the base directory for all worktrees (AGENT_WORKTREE_DIR).
+def _worktrees_base(worktree_dir: str | None = None) -> str:
+    """Return the base directory for all worktrees.
+
+    Args:
+        worktree_dir: Explicit worktree dir (from ProjectConfig). Falls back
+                      to AGENT_WORKTREE_DIR env var if None.
 
     This directory is separate from AGENT_WORKSPACE so worktrees can live
     outside the main repository tree.
 
     Raises:
-        RuntimeError: If AGENT_WORKTREE_DIR is not set.
+        RuntimeError: If neither param nor env var is set.
     """
-    wt_dir = os.environ.get("AGENT_WORKTREE_DIR")
+    wt_dir = worktree_dir or os.environ.get("AGENT_WORKTREE_DIR")
     if not wt_dir:
         raise RuntimeError(
             "AGENT_WORKTREE_DIR not set — cannot create worktrees. "
@@ -64,6 +72,8 @@ def create_worktree(
     name: str,
     branch: str | None = None,
     base_branch: str = "main",
+    repo_path: str | None = None,
+    worktree_dir: str | None = None,
 ) -> str:
     """Create a git worktree and return its absolute path.
 
@@ -71,6 +81,8 @@ def create_worktree(
         name: Worktree directory name (e.g. "elliot-funds-abc123").
         branch: Branch name to create. Defaults to "worktree/{name}".
         base_branch: Branch to base the new worktree from.
+        repo_path: Explicit repo path (overrides AGENT_WORKSPACE env var).
+        worktree_dir: Explicit worktree dir (overrides AGENT_WORKTREE_DIR env var).
 
     Returns:
         Absolute path to the worktree directory.
@@ -78,8 +90,8 @@ def create_worktree(
     Raises:
         RuntimeError: If worktree creation fails.
     """
-    ws = _workspace_root()
-    base = _worktrees_base()
+    ws = _workspace_root(repo_path)
+    base = _worktrees_base(worktree_dir)
     os.makedirs(base, exist_ok=True)
 
     wt_path = os.path.join(base, name)
@@ -198,8 +210,17 @@ def ensure_worktree(
     agent_key: str,
     task_id: str | None = None,
     base_branch: str = "main",
+    repo_path: str | None = None,
+    worktree_dir: str | None = None,
 ) -> str:
     """Ensure a worktree exists for this agent/task and return its path.
+
+    Args:
+        agent_key: Agent identifier (e.g. "elliot").
+        task_id: Optional task suffix. Defaults to "default".
+        base_branch: Branch to base the worktree from.
+        repo_path: Explicit repo path (overrides AGENT_WORKSPACE env var).
+        worktree_dir: Explicit worktree dir (overrides AGENT_WORKTREE_DIR env var).
 
     Naming:
         - With task_id: "{agent_key}-{task_id}"
@@ -207,7 +228,10 @@ def ensure_worktree(
     """
     suffix = task_id or "default"
     name = f"{agent_key}-{suffix}"
-    return create_worktree(name, base_branch=base_branch)
+    return create_worktree(
+        name, base_branch=base_branch,
+        repo_path=repo_path, worktree_dir=worktree_dir,
+    )
 
 
 def list_worktrees() -> list[dict[str, str]]:
